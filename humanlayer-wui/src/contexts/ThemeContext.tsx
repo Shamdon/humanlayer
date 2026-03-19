@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useState, useEffect } from 'react'
 import { syncWindowBackgroundWithTheme } from '@/lib/windowTheme'
+import React, { createContext, useContext, useEffect, useState } from 'react'
 
 export type Theme =
   | 'solarized-dark'
@@ -20,6 +20,7 @@ export type Theme =
   | 'tokyo-night-storm'
   | 'bubblegum'
   | 'l33t'
+  | 'vesper'
 
 interface ThemeContextType {
   theme: Theme

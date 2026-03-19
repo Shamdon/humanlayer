@@ -17,6 +17,7 @@ type ApprovalReconciler interface {
 type Status string
 
 const (
+	StatusDraft        Status = "draft" // Session in configuration state
 	StatusStarting     Status = "starting"
 	StatusRunning      Status = "running"
 	StatusCompleted    Status = "completed"
@@ -24,6 +25,7 @@ const (
 	StatusInterrupting Status = "interrupting"  // Session received interrupt signal and is shutting down
 	StatusInterrupted  Status = "interrupted"   // Session was interrupted but can be resumed
 	StatusWaitingInput Status = "waiting_input" // Session is waiting for tool approval input
+	StatusDiscarded    Status = "discarded"     // Draft session was discarded by the user
 )
 
 // Session represents a Claude Code session managed by the daemon
@@ -60,6 +62,11 @@ type Info struct {
 	DangerouslySkipPermissions          bool               `json:"dangerously_skip_permissions"`
 	DangerouslySkipPermissionsExpiresAt *time.Time         `json:"dangerously_skip_permissions_expires_at,omitempty"`
 	Archived                            bool               `json:"archived"`
+	EditorState                         *string            `json:"editor_state,omitempty"`
+	ProxyEnabled                        bool               `json:"proxy_enabled"`
+	ProxyBaseURL                        string             `json:"proxy_base_url,omitempty"`
+	ProxyModelOverride                  string             `json:"proxy_model_override,omitempty"`
+	ProxyAPIKey                         string             `json:"proxy_api_key,omitempty"`
 }
 
 // LaunchSessionConfig contains the configuration for launching a new session
@@ -70,6 +77,7 @@ type LaunchSessionConfig struct {
 	AutoAcceptEdits                   bool   // Auto-accept edit tools
 	DangerouslySkipPermissions        bool   // Whether to auto-approve all tools
 	DangerouslySkipPermissionsTimeout *int64 // Optional timeout in milliseconds
+	CreateDirectoryIfNotExists        bool   // Create working directory if it doesn't exist
 	// Proxy configuration
 	ProxyEnabled       bool   // Whether proxy is enabled
 	ProxyBaseURL       string // Proxy base URL
@@ -96,10 +104,20 @@ type ContinueSessionConfig struct {
 	ProxyAPIKey           string                // API key for proxy service
 }
 
+// DirectoryNotFoundError indicates a directory doesn't exist and needs creation
+type DirectoryNotFoundError struct {
+	Path    string
+	Message string
+}
+
+func (e *DirectoryNotFoundError) Error() string {
+	return e.Message
+}
+
 // SessionManager defines the interface for managing Claude Code sessions
 type SessionManager interface {
 	// LaunchSession starts a new Claude Code session
-	LaunchSession(ctx context.Context, config LaunchSessionConfig) (*Session, error)
+	LaunchSession(ctx context.Context, config LaunchSessionConfig, isDraft bool) (*Session, error)
 
 	// ContinueSession resumes an existing completed session with a new query and optional config overrides
 	ContinueSession(ctx context.Context, req ContinueSessionConfig) (*Session, error)
@@ -112,6 +130,9 @@ type SessionManager interface {
 
 	// InterruptSession interrupts a running session
 	InterruptSession(ctx context.Context, sessionID string) error
+
+	// LaunchDraftSession launches a draft session by transitioning it to running state
+	LaunchDraftSession(ctx context.Context, sessionID string, prompt string, createDirectoryIfNotExists bool) error
 
 	// StopAllSessions gracefully stops all active sessions with a timeout
 	StopAllSessions(timeout time.Duration) error
@@ -170,6 +191,11 @@ func SessionToInfo(s store.Session) Info {
 		DangerouslySkipPermissions:          s.DangerouslySkipPermissions,
 		DangerouslySkipPermissionsExpiresAt: s.DangerouslySkipPermissionsExpiresAt,
 		Archived:                            s.Archived,
+		EditorState:                         s.EditorState,
+		ProxyEnabled:                        s.ProxyEnabled,
+		ProxyBaseURL:                        s.ProxyBaseURL,
+		ProxyModelOverride:                  s.ProxyModelOverride,
+		ProxyAPIKey:                         s.ProxyAPIKey,
 		// Note: CLICommand is not stored in database, it's a build-time constant
 	}
 

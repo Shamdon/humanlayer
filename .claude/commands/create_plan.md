@@ -1,3 +1,8 @@
+---
+description: Create detailed implementation plans through interactive research and iteration
+model: opus
+---
+
 # Implementation Plan
 
 You are tasked with creating detailed implementation plans through an interactive, iterative process. You should be skeptical, thorough, and work collaboratively with the user to produce high-quality technical specifications.
@@ -232,6 +237,8 @@ After structure approval:
 - [ ] Edge case handling verified manually
 - [ ] No regressions in related features
 
+**Implementation Note**: After completing this phase and all automated verification passes, pause here for manual confirmation from the human that the manual testing was successful before proceeding to the next phase.
+
 ---
 
 ## Phase 2: [Descriptive Name]
@@ -428,7 +435,7 @@ tasks = [
 ## Example Interaction Flow
 
 ```
-User: /implementation_plan
+User: /create_plan
 Assistant: I'll help you create a detailed implementation plan...
 
 User: We need to add parent-child tracking for Claude sub-tasks. See thoughts/allison/tickets/eng_1478.md

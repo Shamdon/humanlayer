@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { ChevronDown, ChevronUp, FolderOpen, Plus, X, Lock } from 'lucide-react'
+import { ChevronDown, ChevronUp, FolderOpen, Plus, X, Lock, Copy, CircleX } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
@@ -11,6 +11,9 @@ import { useHotkeys } from 'react-hotkeys-hook'
 import { HotkeyScopeBoundary } from '@/components/HotkeyScopeBoundary'
 import { HOTKEY_SCOPES } from '@/hooks/hotkeys/scopes'
 import { cn } from '@/lib/utils'
+import { useFocusTrap } from '@/hooks/useFocusTrap'
+import { copyToClipboard } from '@/utils/clipboard'
+import { daemonClient } from '@/lib/daemon'
 
 interface AdditionalDirectoriesDropdownProps {
   workingDir: string
@@ -42,6 +45,8 @@ export function AdditionalDirectoriesDropdown({
   const [newDirectory, setNewDirectory] = useState('')
   const [isAdding, setIsAdding] = useState(false)
   const [isUpdating, setIsUpdating] = useState(false)
+  const [directoryExists, setDirectoryExists] = useState<boolean | null>(null)
+  const validationTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   // Add refs for focus management
   const addButtonRef = useRef<HTMLButtonElement>(null)
@@ -53,6 +58,11 @@ export function AdditionalDirectoriesDropdown({
   const triggerRef = useRef<HTMLElement | null>(null)
 
   // Use the proper hotkey scope from centralized definitions
+
+  // Add focus trap for proper focus management
+  const focusTrapRef = useFocusTrap(isOpen, {
+    allowTabNavigation: true, // Allows j/k hotkeys to still work
+  })
 
   // Fetch recent paths for autocomplete
   const { paths: recentPaths } = useRecentPaths(20)
@@ -233,27 +243,88 @@ export function AdditionalDirectoriesDropdown({
     },
   )
 
+  // Validate directory existence with debouncing
+  const validateDirectory = async (path: string) => {
+    if (!path.trim()) {
+      setDirectoryExists(null)
+      return
+    }
+
+    try {
+      const result = await daemonClient.validateDirectory(path)
+      // Note: OpenAPI generator renames 'exists' to '_exists' to avoid reserved word
+      setDirectoryExists(result._exists)
+    } catch (error) {
+      console.error('Failed to validate directory:', error)
+      setDirectoryExists(null)
+    }
+  }
+
+  // Debounced validation when newDirectory changes
+  useEffect(() => {
+    // Clear any existing timer
+    if (validationTimerRef.current) {
+      clearTimeout(validationTimerRef.current)
+    }
+
+    if (newDirectory.trim()) {
+      // Set new timer for debounced validation
+      validationTimerRef.current = setTimeout(() => {
+        validateDirectory(newDirectory)
+      }, 300) // 300ms debounce
+    } else {
+      setDirectoryExists(null)
+    }
+
+    // Cleanup on unmount or when newDirectory changes
+    return () => {
+      if (validationTimerRef.current) {
+        clearTimeout(validationTimerRef.current)
+      }
+    }
+  }, [newDirectory])
+
   const handleAddDirectory = async (directoryPath?: string) => {
     const pathToAdd = directoryPath || newDirectory
     const trimmed = pathToAdd.trim()
     if (trimmed && !localDirectories.includes(trimmed)) {
-      const updated = [...localDirectories, trimmed]
-      setLocalDirectories(updated)
       setIsUpdating(true)
+      const wasCreated = directoryExists === false
       try {
+        // Create directory if it doesn't exist
+        if (wasCreated) {
+          await daemonClient.createDirectory(trimmed)
+        }
+
+        // Add to directories list
+        const updated = [...localDirectories, trimmed]
+        setLocalDirectories(updated)
+
         // Await the update to ensure it completes before allowing further actions
         await onDirectoriesChange?.(updated)
         setNewDirectory('')
         setIsAdding(false)
+        setDirectoryExists(null)
 
-        // Show appropriate message based on session status
-        if (sessionStatus === 'running' || sessionStatus === 'starting') {
-          toast.success('Directory added - will apply at next message')
+        // Show appropriate message based on what happened and session status
+        if (wasCreated) {
+          if (sessionStatus === 'running' || sessionStatus === 'starting') {
+            toast.success('Directory created and added - will apply at next message')
+          } else {
+            toast.success('Directory created and added')
+          }
         } else {
-          toast.success('Directory added')
+          if (sessionStatus === 'running' || sessionStatus === 'starting') {
+            toast.success('Directory added - will apply at next message')
+          } else {
+            toast.success('Directory added')
+          }
         }
-      } catch {
-        toast.error('Failed to add directory')
+      } catch (error) {
+        const action = wasCreated ? 'create and add directory' : 'add directory'
+        toast.error(`Failed to ${action}`, {
+          description: error instanceof Error ? error.message : 'Unknown error',
+        })
         // Revert the local change on error
         setLocalDirectories(directories)
       } finally {
@@ -288,19 +359,33 @@ export function AdditionalDirectoriesDropdown({
   const directoryCount = directories?.length || 0
 
   const buttonContent = (
-    <button
-      className={`inline-flex items-center text-xs font-mono transition-colors focus:outline-none ${
-        canEdit
-          ? 'text-muted-foreground hover:text-foreground cursor-pointer'
-          : 'text-muted-foreground/50 cursor-not-allowed'
-      }`}
-      disabled={!canEdit || isUpdating}
-    >
-      <span>{workingDir}</span>
-      {directoryCount > 0 && <span className="ml-1.5">+{directoryCount} more</span>}
-      {!canEdit && <Lock className="h-3 w-3 ml-1" />}
-      {isOpen ? <ChevronUp className="h-3 w-3 ml-1" /> : <ChevronDown className="h-3 w-3 ml-1" />}
-    </button>
+    <div className="inline-flex items-center">
+      <button
+        className={`inline-flex items-center text-sm font-mono transition-colors focus:outline-none ${
+          canEdit
+            ? 'text-foreground hover:text-foreground/80 cursor-pointer'
+            : 'text-foreground/50 cursor-not-allowed'
+        }`}
+        disabled={!canEdit || isUpdating}
+      >
+        <span>{workingDir}</span>
+        {directoryCount > 0 && <span className="ml-1.5">+{directoryCount} more</span>}
+        {!canEdit && <Lock className="h-3 w-3 ml-1" />}
+        {isOpen ? <ChevronUp className="h-3 w-3 ml-1" /> : <ChevronDown className="h-3 w-3 ml-1" />}
+      </button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="w-5 h-5 ml-1"
+        onClick={e => {
+          e.stopPropagation()
+          copyToClipboard(workingDir)
+        }}
+        title="Copy working directory"
+      >
+        <Copy className="w-3 h-3" />
+      </Button>
+    </div>
   )
 
   if (!canEdit) {
@@ -343,7 +428,7 @@ export function AdditionalDirectoriesDropdown({
         {buttonContent}
       </PopoverTrigger>
       <PopoverContent
-        className="w-96 p-3"
+        className="p-3 w-144"
         align="start"
         sideOffset={5}
         onOpenAutoFocus={e => {
@@ -370,9 +455,10 @@ export function AdditionalDirectoriesDropdown({
         <HotkeyScopeBoundary
           scope={HOTKEY_SCOPES.ADDITIONAL_DIRECTORIES}
           isActive={isOpen}
+          rootScopeDisabled={true}
           componentName="AdditionalDirectoriesDropdown"
         >
-          <div className="space-y-2">
+          <div ref={focusTrapRef} className="space-y-2">
             <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground pb-1 border-b">
               <FolderOpen className="h-3 w-3" />
               <span>Working Directory</span>
@@ -434,7 +520,7 @@ export function AdditionalDirectoriesDropdown({
 
               {isAdding && (
                 <div className="flex gap-1 pt-1">
-                  <div className="flex-1" ref={searchInputRef}>
+                  <div className="flex-1 mr-2" ref={searchInputRef}>
                     <SearchInput
                       value={newDirectory}
                       onChange={setNewDirectory}
@@ -448,29 +534,30 @@ export function AdditionalDirectoriesDropdown({
                       }}
                       placeholder="Enter directory path..."
                       recentDirectories={recentPaths || []}
-                      className="!h-7 !text-xs md:!text-xs !mt-0"
+                      className="!h-8 !text-xs md:!text-xs !mt-0"
                       dropdownClassName="text-xs"
                       autoFocus
                     />
                   </div>
                   <Button
                     size="sm"
+                    variant={directoryExists === false ? 'destructive' : 'default'}
                     onClick={() => handleAddDirectory()}
                     disabled={isUpdating || !newDirectory.trim()}
-                    className="h-7 px-2"
+                    className="h-8 px-2"
                   >
-                    Add
+                    {directoryExists === false ? 'Create' : 'Add'}
                   </Button>
                   <Button
-                    size="sm"
+                    size="icon"
                     variant="ghost"
+                    className="h-8 px-2"
                     onClick={() => {
                       setIsAdding(false)
                       setNewDirectory('')
                     }}
-                    className="h-7 px-2"
                   >
-                    Cancel
+                    <CircleX />
                   </Button>
                 </div>
               )}

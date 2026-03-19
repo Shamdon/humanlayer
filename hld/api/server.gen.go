@@ -22,6 +22,12 @@ import (
 	strictgin "github.com/oapi-codegen/runtime/strictmiddleware/gin"
 )
 
+// Defines values for AgentSource.
+const (
+	AgentSourceGlobal AgentSource = "global"
+	AgentSourceLocal  AgentSource = "local"
+)
+
 // Defines values for ApprovalStatus.
 const (
 	ApprovalStatusApproved ApprovalStatus = "approved"
@@ -55,6 +61,7 @@ const (
 
 // Defines values for CreateSessionRequestModel.
 const (
+	Haiku  CreateSessionRequestModel = "haiku"
 	Opus   CreateSessionRequestModel = "opus"
 	Sonnet CreateSessionRequestModel = "sonnet"
 )
@@ -88,6 +95,8 @@ const (
 // Defines values for SessionStatus.
 const (
 	SessionStatusCompleted    SessionStatus = "completed"
+	SessionStatusDiscarded    SessionStatus = "discarded"
+	SessionStatusDraft        SessionStatus = "draft"
 	SessionStatusFailed       SessionStatus = "failed"
 	SessionStatusInterrupted  SessionStatus = "interrupted"
 	SessionStatusInterrupting SessionStatus = "interrupting"
@@ -95,6 +104,37 @@ const (
 	SessionStatusStarting     SessionStatus = "starting"
 	SessionStatusWaitingInput SessionStatus = "waiting_input"
 )
+
+// Defines values for SlashCommandSource.
+const (
+	SlashCommandSourceGlobal SlashCommandSource = "global"
+	SlashCommandSourceLocal  SlashCommandSource = "local"
+)
+
+// Defines values for ListSessionsParamsFilter.
+const (
+	Archived ListSessionsParamsFilter = "archived"
+	Draft    ListSessionsParamsFilter = "draft"
+	Normal   ListSessionsParamsFilter = "normal"
+)
+
+// Agent defines model for Agent.
+type Agent struct {
+	// Description Optional description from YAML frontmatter
+	Description *string `json:"description,omitempty"`
+
+	// MentionText Text to use for mentions
+	MentionText string `json:"mentionText"`
+
+	// Name Agent name from YAML frontmatter
+	Name string `json:"name"`
+
+	// Source Whether agent is from local or global directory
+	Source AgentSource `json:"source"`
+}
+
+// AgentSource Whether agent is from local or global directory
+type AgentSource string
 
 // Approval defines model for Approval.
 type Approval struct {
@@ -152,6 +192,21 @@ type BulkArchiveRequest struct {
 type BulkArchiveResponse struct {
 	Data struct {
 		// FailedSessions Sessions that failed to update
+		FailedSessions *[]string `json:"failed_sessions,omitempty"`
+		Success        bool      `json:"success"`
+	} `json:"data"`
+}
+
+// BulkRestoreDraftsRequest defines model for BulkRestoreDraftsRequest.
+type BulkRestoreDraftsRequest struct {
+	// SessionIds Draft sessions to restore from discarded status
+	SessionIds []string `json:"session_ids"`
+}
+
+// BulkRestoreDraftsResponse defines model for BulkRestoreDraftsResponse.
+type BulkRestoreDraftsResponse struct {
+	Data struct {
+		// FailedSessions Sessions that failed to restore
 		FailedSessions *[]string `json:"failed_sessions,omitempty"`
 		Success        bool      `json:"success"`
 	} `json:"data"`
@@ -301,6 +356,9 @@ type CreateSessionRequest struct {
 	// AutoAcceptEdits Enable auto-accept for edit tools
 	AutoAcceptEdits *bool `json:"auto_accept_edits,omitempty"`
 
+	// CreateDirectoryIfNotExists Create the working directory if it does not exist
+	CreateDirectoryIfNotExists *bool `json:"createDirectoryIfNotExists,omitempty"`
+
 	// CustomInstructions Custom instructions for Claude
 	CustomInstructions *string `json:"custom_instructions,omitempty"`
 
@@ -312,6 +370,9 @@ type CreateSessionRequest struct {
 
 	// DisallowedTools Blacklist of disallowed tools
 	DisallowedTools *[]string `json:"disallowed_tools,omitempty"`
+
+	// Draft Create session in draft state without launching Claude
+	Draft *bool `json:"draft,omitempty"`
 
 	// MaxTurns Maximum conversation turns
 	MaxTurns  *int       `json:"max_turns,omitempty"`
@@ -407,6 +468,21 @@ type DecideApprovalResponse struct {
 	} `json:"data"`
 }
 
+// DirectoryNotFoundResponse defines model for DirectoryNotFoundResponse.
+type DirectoryNotFoundResponse struct {
+	// Error Error code
+	Error string `json:"error"`
+
+	// Message Human-readable error message
+	Message string `json:"message"`
+
+	// Path The directory path that does not exist
+	Path string `json:"path"`
+
+	// RequiresCreation Indicates that directory creation is required
+	RequiresCreation bool `json:"requiresCreation"`
+}
+
 // ErrorDetail defines model for ErrorDetail.
 type ErrorDetail struct {
 	// Code Error code (e.g., HLD-101)
@@ -439,6 +515,24 @@ type Event struct {
 // EventType Type of system event
 type EventType string
 
+// FileMatch defines model for FileMatch.
+type FileMatch struct {
+	// DisplayPath Relative path for display (relative to first search path if applicable)
+	DisplayPath string `json:"displayPath"`
+
+	// IsDirectory True if this is a directory, false for files
+	IsDirectory bool `json:"isDirectory"`
+
+	// MatchedIndexes Character positions of matched query characters
+	MatchedIndexes []int `json:"matchedIndexes"`
+
+	// Path Absolute path to matched file or folder
+	Path string `json:"path"`
+
+	// Score Match quality score (higher is better)
+	Score int `json:"score"`
+}
+
 // FileSnapshot defines model for FileSnapshot.
 type FileSnapshot struct {
 	// Content File content at snapshot time
@@ -450,6 +544,32 @@ type FileSnapshot struct {
 
 	// ToolId Tool invocation that created snapshot
 	ToolId string `json:"tool_id"`
+}
+
+// FuzzySearchFilesRequest defines model for FuzzySearchFilesRequest.
+type FuzzySearchFilesRequest struct {
+	// FilesOnly Return only files, exclude directories
+	FilesOnly *bool `json:"filesOnly,omitempty"`
+
+	// Limit Maximum number of results to return
+	Limit *int `json:"limit,omitempty"`
+
+	// Paths Directory paths to search within
+	Paths []string `json:"paths"`
+
+	// Query Fuzzy search pattern
+	Query string `json:"query"`
+
+	// RespectGitignore Filter out files/folders matching .gitignore patterns
+	RespectGitignore *bool `json:"respectGitignore,omitempty"`
+}
+
+// FuzzySearchFilesResponse defines model for FuzzySearchFilesResponse.
+type FuzzySearchFilesResponse struct {
+	Metadata SearchMetadata `json:"metadata"`
+
+	// Results Matched files/folders sorted by relevance
+	Results []FileMatch `json:"results"`
 }
 
 // HealthResponse defines model for HealthResponse.
@@ -535,6 +655,21 @@ type RecentPathsResponse struct {
 	Data []RecentPath `json:"data"`
 }
 
+// SearchMetadata defines model for SearchMetadata.
+type SearchMetadata struct {
+	// DurationMs Search duration in milliseconds
+	DurationMs int `json:"durationMs"`
+
+	// TimedOut True if search was terminated due to timeout
+	TimedOut bool `json:"timedOut"`
+
+	// TotalMatches Total matches found before applying limit
+	TotalMatches int `json:"totalMatches"`
+
+	// TotalScanned Total number of files/folders scanned
+	TotalScanned int `json:"totalScanned"`
+}
+
 // Session defines model for Session.
 type Session struct {
 	// AdditionalDirectories Additional directories Claude can access
@@ -575,6 +710,9 @@ type Session struct {
 
 	// DurationMs Session duration in milliseconds
 	DurationMs *int `json:"duration_ms"`
+
+	// EditorState JSON blob of editor state for draft sessions
+	EditorState *string `json:"editor_state"`
 
 	// EffectiveContextTokens Total tokens counting toward context window limit
 	EffectiveContextTokens *int `json:"effective_context_tokens"`
@@ -636,12 +774,45 @@ type SessionResponse struct {
 	Data Session `json:"data"`
 }
 
+// SessionSearchResponse defines model for SessionSearchResponse.
+type SessionSearchResponse struct {
+	Data []Session `json:"data"`
+}
+
 // SessionStatus Current status of the session
 type SessionStatus string
 
 // SessionsResponse defines model for SessionsResponse.
 type SessionsResponse struct {
+	// Counts Session counts by category
+	Counts *struct {
+		// Archived Number of archived sessions
+		Archived *int `json:"archived,omitempty"`
+
+		// Draft Number of draft sessions
+		Draft *int `json:"draft,omitempty"`
+
+		// Normal Number of normal (non-archived, non-draft) sessions
+		Normal *int `json:"normal,omitempty"`
+	} `json:"counts,omitempty"`
 	Data []Session `json:"data"`
+}
+
+// SlashCommand defines model for SlashCommand.
+type SlashCommand struct {
+	// Name Command name including slash prefix
+	Name string `json:"name"`
+
+	// Source Source of the command - local (repo) or global (user home)
+	Source SlashCommandSource `json:"source"`
+}
+
+// SlashCommandSource Source of the command - local (repo) or global (user home)
+type SlashCommandSource string
+
+// SlashCommandsResponse defines model for SlashCommandsResponse.
+type SlashCommandsResponse struct {
+	Data []SlashCommand `json:"data"`
 }
 
 // SnapshotsResponse defines model for SnapshotsResponse.
@@ -672,6 +843,9 @@ type UpdateSessionRequest struct {
 	// DangerouslySkipPermissionsTimeoutMs Optional timeout in milliseconds for dangerously skip permissions mode
 	DangerouslySkipPermissionsTimeoutMs *int64 `json:"dangerously_skip_permissions_timeout_ms"`
 
+	// EditorState JSON blob of editor state for draft sessions
+	EditorState *string `json:"editor_state,omitempty"`
+
 	// Model Model to use (opus, sonnet, or empty for default)
 	Model *string `json:"model,omitempty"`
 
@@ -690,8 +864,14 @@ type UpdateSessionRequest struct {
 	// ProxyModelOverride Model identifier for proxy routing
 	ProxyModelOverride *string `json:"proxy_model_override,omitempty"`
 
+	// Status Current status of the session
+	Status *SessionStatus `json:"status,omitempty"`
+
 	// Title Update session title
 	Title *string `json:"title,omitempty"`
+
+	// WorkingDir Update the working directory for the session
+	WorkingDir *string `json:"working_dir,omitempty"`
 }
 
 // UpdateUserSettingsRequest defines model for UpdateUserSettingsRequest.
@@ -719,6 +899,30 @@ type UserSettingsResponse struct {
 	Data UserSettings `json:"data"`
 }
 
+// ValidateDirectoryRequest defines model for ValidateDirectoryRequest.
+type ValidateDirectoryRequest struct {
+	// Path Directory path to validate
+	Path string `json:"path"`
+}
+
+// ValidateDirectoryResponse defines model for ValidateDirectoryResponse.
+type ValidateDirectoryResponse struct {
+	// CanCreate Whether the directory can be created (only set if exists is false)
+	CanCreate *bool `json:"canCreate,omitempty"`
+
+	// Error Error message if path validation failed
+	Error *string `json:"error,omitempty"`
+
+	// Exists Whether the directory exists
+	Exists bool `json:"exists"`
+
+	// ExpandedPath The expanded path with ~ resolved
+	ExpandedPath string `json:"expandedPath"`
+
+	// IsDirectory Whether the path is a directory (only set if exists is true)
+	IsDirectory *bool `json:"isDirectory,omitempty"`
+}
+
 // ApprovalId defines model for approvalId.
 type ApprovalId = string
 
@@ -734,10 +938,22 @@ type InternalError = ErrorResponse
 // NotFound defines model for NotFound.
 type NotFound = ErrorResponse
 
+// DiscoverAgentsJSONBody defines parameters for DiscoverAgents.
+type DiscoverAgentsJSONBody struct {
+	// WorkingDir Session working directory for local agent discovery
+	WorkingDir string `json:"workingDir"`
+}
+
 // ListApprovalsParams defines parameters for ListApprovals.
 type ListApprovalsParams struct {
 	// SessionId Filter by session ID
 	SessionId *string `form:"sessionId,omitempty" json:"sessionId,omitempty"`
+}
+
+// CreateDirectoryJSONBody defines parameters for CreateDirectory.
+type CreateDirectoryJSONBody struct {
+	// Path The directory path to create
+	Path string `json:"path"`
 }
 
 // GetRecentPathsParams defines parameters for GetRecentPaths.
@@ -748,15 +964,45 @@ type GetRecentPathsParams struct {
 
 // ListSessionsParams defines parameters for ListSessions.
 type ListSessionsParams struct {
-	// LeafOnly Return only leaf sessions (no children)
-	LeafOnly *bool `form:"leafOnly,omitempty" json:"leafOnly,omitempty"`
+	// LeavesOnly Return only leaf sessions (sessions with no children)
+	LeavesOnly *bool `form:"leavesOnly,omitempty" json:"leavesOnly,omitempty"`
 
-	// IncludeArchived Include archived sessions in results
-	IncludeArchived *bool `form:"includeArchived,omitempty" json:"includeArchived,omitempty"`
-
-	// ArchivedOnly Return only archived sessions
-	ArchivedOnly *bool `form:"archivedOnly,omitempty" json:"archivedOnly,omitempty"`
+	// Filter Filter sessions by type
+	Filter *ListSessionsParamsFilter `form:"filter,omitempty" json:"filter,omitempty"`
 }
+
+// ListSessionsParamsFilter defines parameters for ListSessions.
+type ListSessionsParamsFilter string
+
+// SearchSessionsParams defines parameters for SearchSessions.
+type SearchSessionsParams struct {
+	// Query Search query for title matching (uses SQL LIKE)
+	Query *string `form:"query,omitempty" json:"query,omitempty"`
+
+	// Limit Maximum number of results to return
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// LaunchDraftSessionJSONBody defines parameters for LaunchDraftSession.
+type LaunchDraftSessionJSONBody struct {
+	// CreateDirectoryIfNotExists Create working directory if it doesn't exist
+	CreateDirectoryIfNotExists *bool `json:"createDirectoryIfNotExists,omitempty"`
+
+	// Prompt Initial prompt to send to Claude
+	Prompt string `json:"prompt"`
+}
+
+// GetSlashCommandsParams defines parameters for GetSlashCommands.
+type GetSlashCommandsParams struct {
+	// WorkingDir Working directory to search for commands
+	WorkingDir string `form:"working_dir" json:"working_dir"`
+
+	// Query Fuzzy search query
+	Query *string `form:"query,omitempty" json:"query,omitempty"`
+}
+
+// DiscoverAgentsJSONRequestBody defines body for DiscoverAgents for application/json ContentType.
+type DiscoverAgentsJSONRequestBody DiscoverAgentsJSONBody
 
 // CreateApprovalJSONRequestBody defines body for CreateApproval for application/json ContentType.
 type CreateApprovalJSONRequestBody = CreateApprovalRequest
@@ -767,11 +1013,20 @@ type DecideApprovalJSONRequestBody = DecideApprovalRequest
 // UpdateConfigJSONRequestBody defines body for UpdateConfig for application/json ContentType.
 type UpdateConfigJSONRequestBody = UpdateConfigRequest
 
+// CreateDirectoryJSONRequestBody defines body for CreateDirectory for application/json ContentType.
+type CreateDirectoryJSONRequestBody CreateDirectoryJSONBody
+
+// FuzzySearchFilesJSONRequestBody defines body for FuzzySearchFiles for application/json ContentType.
+type FuzzySearchFilesJSONRequestBody = FuzzySearchFilesRequest
+
 // CreateSessionJSONRequestBody defines body for CreateSession for application/json ContentType.
 type CreateSessionJSONRequestBody = CreateSessionRequest
 
 // BulkArchiveSessionsJSONRequestBody defines body for BulkArchiveSessions for application/json ContentType.
 type BulkArchiveSessionsJSONRequestBody = BulkArchiveRequest
+
+// BulkRestoreDraftsJSONRequestBody defines body for BulkRestoreDrafts for application/json ContentType.
+type BulkRestoreDraftsJSONRequestBody = BulkRestoreDraftsRequest
 
 // UpdateSessionJSONRequestBody defines body for UpdateSession for application/json ContentType.
 type UpdateSessionJSONRequestBody = UpdateSessionRequest
@@ -779,11 +1034,20 @@ type UpdateSessionJSONRequestBody = UpdateSessionRequest
 // ContinueSessionJSONRequestBody defines body for ContinueSession for application/json ContentType.
 type ContinueSessionJSONRequestBody = ContinueSessionRequest
 
+// LaunchDraftSessionJSONRequestBody defines body for LaunchDraftSession for application/json ContentType.
+type LaunchDraftSessionJSONRequestBody LaunchDraftSessionJSONBody
+
 // UpdateUserSettingsJSONRequestBody defines body for UpdateUserSettings for application/json ContentType.
 type UpdateUserSettingsJSONRequestBody = UpdateUserSettingsRequest
 
+// ValidateDirectoryJSONRequestBody defines body for ValidateDirectory for application/json ContentType.
+type ValidateDirectoryJSONRequestBody = ValidateDirectoryRequest
+
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// Discover available agents
+	// (POST /agents/discover)
+	DiscoverAgents(c *gin.Context)
 	// List approval requests
 	// (GET /approvals)
 	ListApprovals(c *gin.Context, params ListApprovalsParams)
@@ -805,6 +1069,12 @@ type ServerInterface interface {
 	// Get debug information
 	// (GET /debug-info)
 	GetDebugInfo(c *gin.Context)
+	// Create a directory
+	// (POST /directories)
+	CreateDirectory(c *gin.Context)
+	// Fuzzy search for files and folders
+	// (POST /fuzzy-search/files)
+	FuzzySearchFiles(c *gin.Context)
 	// Health check
 	// (GET /health)
 	GetHealth(c *gin.Context)
@@ -820,6 +1090,12 @@ type ServerInterface interface {
 	// Bulk archive/unarchive sessions
 	// (POST /sessions/archive)
 	BulkArchiveSessions(c *gin.Context)
+	// Restore multiple discarded draft sessions
+	// (POST /sessions/restore)
+	BulkRestoreDrafts(c *gin.Context)
+	// Search sessions by title
+	// (GET /sessions/search)
+	SearchSessions(c *gin.Context, params SearchSessionsParams)
 	// Get session details
 	// (GET /sessions/{id})
 	GetSession(c *gin.Context, id SessionId)
@@ -829,21 +1105,36 @@ type ServerInterface interface {
 	// Continue or fork a session
 	// (POST /sessions/{id}/continue)
 	ContinueSession(c *gin.Context, id SessionId)
+	// Permanently delete an empty draft session
+	// (DELETE /sessions/{id}/hard-delete-empty)
+	HardDeleteEmptyDraftSession(c *gin.Context, id SessionId)
 	// Interrupt a running session
 	// (POST /sessions/{id}/interrupt)
 	InterruptSession(c *gin.Context, id SessionId)
+	// Delete a draft session
+	// (DELETE /sessions/{id}/launch)
+	DeleteDraftSession(c *gin.Context, id SessionId)
+	// Launch a draft session
+	// (POST /sessions/{id}/launch)
+	LaunchDraftSession(c *gin.Context, id SessionId)
 	// Get conversation messages
 	// (GET /sessions/{id}/messages)
 	GetSessionMessages(c *gin.Context, id SessionId)
 	// Get file snapshots
 	// (GET /sessions/{id}/snapshots)
 	GetSessionSnapshots(c *gin.Context, id SessionId)
+	// Get available slash commands
+	// (GET /slash-commands)
+	GetSlashCommands(c *gin.Context, params GetSlashCommandsParams)
 	// Get user settings
 	// (GET /user-settings)
 	GetUserSettings(c *gin.Context)
 	// Update user settings
 	// (PATCH /user-settings)
 	UpdateUserSettings(c *gin.Context)
+	// Validate directory existence
+	// (POST /validate-directory)
+	ValidateDirectory(c *gin.Context)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -854,6 +1145,19 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(c *gin.Context)
+
+// DiscoverAgents operation middleware
+func (siw *ServerInterfaceWrapper) DiscoverAgents(c *gin.Context) {
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.DiscoverAgents(c)
+}
 
 // ListApprovals operation middleware
 func (siw *ServerInterfaceWrapper) ListApprovals(c *gin.Context) {
@@ -981,6 +1285,32 @@ func (siw *ServerInterfaceWrapper) GetDebugInfo(c *gin.Context) {
 	siw.Handler.GetDebugInfo(c)
 }
 
+// CreateDirectory operation middleware
+func (siw *ServerInterfaceWrapper) CreateDirectory(c *gin.Context) {
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.CreateDirectory(c)
+}
+
+// FuzzySearchFiles operation middleware
+func (siw *ServerInterfaceWrapper) FuzzySearchFiles(c *gin.Context) {
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.FuzzySearchFiles(c)
+}
+
 // GetHealth operation middleware
 func (siw *ServerInterfaceWrapper) GetHealth(c *gin.Context) {
 
@@ -1028,27 +1358,19 @@ func (siw *ServerInterfaceWrapper) ListSessions(c *gin.Context) {
 	// Parameter object where we will unmarshal all parameters from the context
 	var params ListSessionsParams
 
-	// ------------- Optional query parameter "leafOnly" -------------
+	// ------------- Optional query parameter "leavesOnly" -------------
 
-	err = runtime.BindQueryParameter("form", true, false, "leafOnly", c.Request.URL.Query(), &params.LeafOnly)
+	err = runtime.BindQueryParameter("form", true, false, "leavesOnly", c.Request.URL.Query(), &params.LeavesOnly)
 	if err != nil {
-		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter leafOnly: %w", err), http.StatusBadRequest)
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter leavesOnly: %w", err), http.StatusBadRequest)
 		return
 	}
 
-	// ------------- Optional query parameter "includeArchived" -------------
+	// ------------- Optional query parameter "filter" -------------
 
-	err = runtime.BindQueryParameter("form", true, false, "includeArchived", c.Request.URL.Query(), &params.IncludeArchived)
+	err = runtime.BindQueryParameter("form", true, false, "filter", c.Request.URL.Query(), &params.Filter)
 	if err != nil {
-		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter includeArchived: %w", err), http.StatusBadRequest)
-		return
-	}
-
-	// ------------- Optional query parameter "archivedOnly" -------------
-
-	err = runtime.BindQueryParameter("form", true, false, "archivedOnly", c.Request.URL.Query(), &params.ArchivedOnly)
-	if err != nil {
-		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter archivedOnly: %w", err), http.StatusBadRequest)
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter filter: %w", err), http.StatusBadRequest)
 		return
 	}
 
@@ -1086,6 +1408,53 @@ func (siw *ServerInterfaceWrapper) BulkArchiveSessions(c *gin.Context) {
 	}
 
 	siw.Handler.BulkArchiveSessions(c)
+}
+
+// BulkRestoreDrafts operation middleware
+func (siw *ServerInterfaceWrapper) BulkRestoreDrafts(c *gin.Context) {
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.BulkRestoreDrafts(c)
+}
+
+// SearchSessions operation middleware
+func (siw *ServerInterfaceWrapper) SearchSessions(c *gin.Context) {
+
+	var err error
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params SearchSessionsParams
+
+	// ------------- Optional query parameter "query" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "query", c.Request.URL.Query(), &params.Query)
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter query: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "limit", c.Request.URL.Query(), &params.Limit)
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter limit: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.SearchSessions(c, params)
 }
 
 // GetSession operation middleware
@@ -1160,6 +1529,30 @@ func (siw *ServerInterfaceWrapper) ContinueSession(c *gin.Context) {
 	siw.Handler.ContinueSession(c, id)
 }
 
+// HardDeleteEmptyDraftSession operation middleware
+func (siw *ServerInterfaceWrapper) HardDeleteEmptyDraftSession(c *gin.Context) {
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id SessionId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", c.Param("id"), &id, runtime.BindStyledParameterOptions{Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter id: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.HardDeleteEmptyDraftSession(c, id)
+}
+
 // InterruptSession operation middleware
 func (siw *ServerInterfaceWrapper) InterruptSession(c *gin.Context) {
 
@@ -1182,6 +1575,54 @@ func (siw *ServerInterfaceWrapper) InterruptSession(c *gin.Context) {
 	}
 
 	siw.Handler.InterruptSession(c, id)
+}
+
+// DeleteDraftSession operation middleware
+func (siw *ServerInterfaceWrapper) DeleteDraftSession(c *gin.Context) {
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id SessionId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", c.Param("id"), &id, runtime.BindStyledParameterOptions{Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter id: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.DeleteDraftSession(c, id)
+}
+
+// LaunchDraftSession operation middleware
+func (siw *ServerInterfaceWrapper) LaunchDraftSession(c *gin.Context) {
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id SessionId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", c.Param("id"), &id, runtime.BindStyledParameterOptions{Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter id: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.LaunchDraftSession(c, id)
 }
 
 // GetSessionMessages operation middleware
@@ -1232,6 +1673,47 @@ func (siw *ServerInterfaceWrapper) GetSessionSnapshots(c *gin.Context) {
 	siw.Handler.GetSessionSnapshots(c, id)
 }
 
+// GetSlashCommands operation middleware
+func (siw *ServerInterfaceWrapper) GetSlashCommands(c *gin.Context) {
+
+	var err error
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetSlashCommandsParams
+
+	// ------------- Required query parameter "working_dir" -------------
+
+	if paramValue := c.Query("working_dir"); paramValue != "" {
+
+	} else {
+		siw.ErrorHandler(c, fmt.Errorf("Query argument working_dir is required, but not found"), http.StatusBadRequest)
+		return
+	}
+
+	err = runtime.BindQueryParameter("form", true, true, "working_dir", c.Request.URL.Query(), &params.WorkingDir)
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter working_dir: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	// ------------- Optional query parameter "query" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "query", c.Request.URL.Query(), &params.Query)
+	if err != nil {
+		siw.ErrorHandler(c, fmt.Errorf("Invalid format for parameter query: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.GetSlashCommands(c, params)
+}
+
 // GetUserSettings operation middleware
 func (siw *ServerInterfaceWrapper) GetUserSettings(c *gin.Context) {
 
@@ -1256,6 +1738,19 @@ func (siw *ServerInterfaceWrapper) UpdateUserSettings(c *gin.Context) {
 	}
 
 	siw.Handler.UpdateUserSettings(c)
+}
+
+// ValidateDirectory operation middleware
+func (siw *ServerInterfaceWrapper) ValidateDirectory(c *gin.Context) {
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		middleware(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+
+	siw.Handler.ValidateDirectory(c)
 }
 
 // GinServerOptions provides options for the Gin server.
@@ -1285,6 +1780,7 @@ func RegisterHandlersWithOptions(router gin.IRouter, si ServerInterface, options
 		ErrorHandler:       errorHandler,
 	}
 
+	router.POST(options.BaseURL+"/agents/discover", wrapper.DiscoverAgents)
 	router.GET(options.BaseURL+"/approvals", wrapper.ListApprovals)
 	router.POST(options.BaseURL+"/approvals", wrapper.CreateApproval)
 	router.GET(options.BaseURL+"/approvals/:id", wrapper.GetApproval)
@@ -1292,19 +1788,28 @@ func RegisterHandlersWithOptions(router gin.IRouter, si ServerInterface, options
 	router.GET(options.BaseURL+"/config", wrapper.GetConfig)
 	router.PATCH(options.BaseURL+"/config", wrapper.UpdateConfig)
 	router.GET(options.BaseURL+"/debug-info", wrapper.GetDebugInfo)
+	router.POST(options.BaseURL+"/directories", wrapper.CreateDirectory)
+	router.POST(options.BaseURL+"/fuzzy-search/files", wrapper.FuzzySearchFiles)
 	router.GET(options.BaseURL+"/health", wrapper.GetHealth)
 	router.GET(options.BaseURL+"/recent-paths", wrapper.GetRecentPaths)
 	router.GET(options.BaseURL+"/sessions", wrapper.ListSessions)
 	router.POST(options.BaseURL+"/sessions", wrapper.CreateSession)
 	router.POST(options.BaseURL+"/sessions/archive", wrapper.BulkArchiveSessions)
+	router.POST(options.BaseURL+"/sessions/restore", wrapper.BulkRestoreDrafts)
+	router.GET(options.BaseURL+"/sessions/search", wrapper.SearchSessions)
 	router.GET(options.BaseURL+"/sessions/:id", wrapper.GetSession)
 	router.PATCH(options.BaseURL+"/sessions/:id", wrapper.UpdateSession)
 	router.POST(options.BaseURL+"/sessions/:id/continue", wrapper.ContinueSession)
+	router.DELETE(options.BaseURL+"/sessions/:id/hard-delete-empty", wrapper.HardDeleteEmptyDraftSession)
 	router.POST(options.BaseURL+"/sessions/:id/interrupt", wrapper.InterruptSession)
+	router.DELETE(options.BaseURL+"/sessions/:id/launch", wrapper.DeleteDraftSession)
+	router.POST(options.BaseURL+"/sessions/:id/launch", wrapper.LaunchDraftSession)
 	router.GET(options.BaseURL+"/sessions/:id/messages", wrapper.GetSessionMessages)
 	router.GET(options.BaseURL+"/sessions/:id/snapshots", wrapper.GetSessionSnapshots)
+	router.GET(options.BaseURL+"/slash-commands", wrapper.GetSlashCommands)
 	router.GET(options.BaseURL+"/user-settings", wrapper.GetUserSettings)
 	router.PATCH(options.BaseURL+"/user-settings", wrapper.UpdateUserSettings)
+	router.POST(options.BaseURL+"/validate-directory", wrapper.ValidateDirectory)
 }
 
 type BadRequestJSONResponse ErrorResponse
@@ -1312,6 +1817,43 @@ type BadRequestJSONResponse ErrorResponse
 type InternalErrorJSONResponse ErrorResponse
 
 type NotFoundJSONResponse ErrorResponse
+
+type DiscoverAgentsRequestObject struct {
+	Body *DiscoverAgentsJSONRequestBody
+}
+
+type DiscoverAgentsResponseObject interface {
+	VisitDiscoverAgentsResponse(w http.ResponseWriter) error
+}
+
+type DiscoverAgents200JSONResponse struct {
+	Agents []Agent `json:"agents"`
+}
+
+func (response DiscoverAgents200JSONResponse) VisitDiscoverAgentsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type DiscoverAgents400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response DiscoverAgents400JSONResponse) VisitDiscoverAgentsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type DiscoverAgents500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response DiscoverAgents500JSONResponse) VisitDiscoverAgentsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
 
 type ListApprovalsRequestObject struct {
 	Params ListApprovalsParams
@@ -1530,6 +2072,73 @@ func (response GetDebugInfo200JSONResponse) VisitGetDebugInfoResponse(w http.Res
 	return json.NewEncoder(w).Encode(response)
 }
 
+type CreateDirectoryRequestObject struct {
+	Body *CreateDirectoryJSONRequestBody
+}
+
+type CreateDirectoryResponseObject interface {
+	VisitCreateDirectoryResponse(w http.ResponseWriter) error
+}
+
+type CreateDirectory200JSONResponse struct {
+	// Created Whether the directory was created
+	Created *bool `json:"created,omitempty"`
+
+	// Path The created directory path
+	Path *string `json:"path,omitempty"`
+}
+
+func (response CreateDirectory200JSONResponse) VisitCreateDirectoryResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type CreateDirectory500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response CreateDirectory500JSONResponse) VisitCreateDirectoryResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type FuzzySearchFilesRequestObject struct {
+	Body *FuzzySearchFilesJSONRequestBody
+}
+
+type FuzzySearchFilesResponseObject interface {
+	VisitFuzzySearchFilesResponse(w http.ResponseWriter) error
+}
+
+type FuzzySearchFiles200JSONResponse FuzzySearchFilesResponse
+
+func (response FuzzySearchFiles200JSONResponse) VisitFuzzySearchFilesResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type FuzzySearchFiles400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response FuzzySearchFiles400JSONResponse) VisitFuzzySearchFilesResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type FuzzySearchFiles500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response FuzzySearchFiles500JSONResponse) VisitFuzzySearchFilesResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type GetHealthRequestObject struct {
 }
 
@@ -1624,6 +2233,15 @@ func (response CreateSession400JSONResponse) VisitCreateSessionResponse(w http.R
 	return json.NewEncoder(w).Encode(response)
 }
 
+type CreateSession422JSONResponse DirectoryNotFoundResponse
+
+func (response CreateSession422JSONResponse) VisitCreateSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(422)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type CreateSession500JSONResponse struct{ InternalErrorJSONResponse }
 
 func (response CreateSession500JSONResponse) VisitCreateSessionResponse(w http.ResponseWriter) error {
@@ -1671,6 +2289,85 @@ func (response BulkArchiveSessions400JSONResponse) VisitBulkArchiveSessionsRespo
 type BulkArchiveSessions500JSONResponse struct{ InternalErrorJSONResponse }
 
 func (response BulkArchiveSessions500JSONResponse) VisitBulkArchiveSessionsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type BulkRestoreDraftsRequestObject struct {
+	Body *BulkRestoreDraftsJSONRequestBody
+}
+
+type BulkRestoreDraftsResponseObject interface {
+	VisitBulkRestoreDraftsResponse(w http.ResponseWriter) error
+}
+
+type BulkRestoreDrafts200JSONResponse BulkRestoreDraftsResponse
+
+func (response BulkRestoreDrafts200JSONResponse) VisitBulkRestoreDraftsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type BulkRestoreDrafts207JSONResponse BulkRestoreDraftsResponse
+
+func (response BulkRestoreDrafts207JSONResponse) VisitBulkRestoreDraftsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(207)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type BulkRestoreDrafts400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response BulkRestoreDrafts400JSONResponse) VisitBulkRestoreDraftsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type BulkRestoreDrafts500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response BulkRestoreDrafts500JSONResponse) VisitBulkRestoreDraftsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type SearchSessionsRequestObject struct {
+	Params SearchSessionsParams
+}
+
+type SearchSessionsResponseObject interface {
+	VisitSearchSessionsResponse(w http.ResponseWriter) error
+}
+
+type SearchSessions200JSONResponse SessionSearchResponse
+
+func (response SearchSessions200JSONResponse) VisitSearchSessionsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type SearchSessions400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response SearchSessions400JSONResponse) VisitSearchSessionsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type SearchSessions500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response SearchSessions500JSONResponse) VisitSearchSessionsResponse(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(500)
 
@@ -1730,6 +2427,15 @@ func (response UpdateSession200JSONResponse) VisitUpdateSessionResponse(w http.R
 	return json.NewEncoder(w).Encode(response)
 }
 
+type UpdateSession400JSONResponse ErrorResponse
+
+func (response UpdateSession400JSONResponse) VisitUpdateSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type UpdateSession404JSONResponse struct{ NotFoundJSONResponse }
 
 func (response UpdateSession404JSONResponse) VisitUpdateSessionResponse(w http.ResponseWriter) error {
@@ -1784,6 +2490,49 @@ func (response ContinueSession500JSONResponse) VisitContinueSessionResponse(w ht
 	return json.NewEncoder(w).Encode(response)
 }
 
+type HardDeleteEmptyDraftSessionRequestObject struct {
+	Id SessionId `json:"id"`
+}
+
+type HardDeleteEmptyDraftSessionResponseObject interface {
+	VisitHardDeleteEmptyDraftSessionResponse(w http.ResponseWriter) error
+}
+
+type HardDeleteEmptyDraftSession204Response struct {
+}
+
+func (response HardDeleteEmptyDraftSession204Response) VisitHardDeleteEmptyDraftSessionResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type HardDeleteEmptyDraftSession400JSONResponse ErrorResponse
+
+func (response HardDeleteEmptyDraftSession400JSONResponse) VisitHardDeleteEmptyDraftSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type HardDeleteEmptyDraftSession404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response HardDeleteEmptyDraftSession404JSONResponse) VisitHardDeleteEmptyDraftSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type HardDeleteEmptyDraftSession500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response HardDeleteEmptyDraftSession500JSONResponse) VisitHardDeleteEmptyDraftSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type InterruptSessionRequestObject struct {
 	Id SessionId `json:"id"`
 }
@@ -1822,6 +2571,103 @@ func (response InterruptSession404JSONResponse) VisitInterruptSessionResponse(w 
 type InterruptSession500JSONResponse struct{ InternalErrorJSONResponse }
 
 func (response InterruptSession500JSONResponse) VisitInterruptSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type DeleteDraftSessionRequestObject struct {
+	Id SessionId `json:"id"`
+}
+
+type DeleteDraftSessionResponseObject interface {
+	VisitDeleteDraftSessionResponse(w http.ResponseWriter) error
+}
+
+type DeleteDraftSession204Response struct {
+}
+
+func (response DeleteDraftSession204Response) VisitDeleteDraftSessionResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteDraftSession400JSONResponse ErrorResponse
+
+func (response DeleteDraftSession400JSONResponse) VisitDeleteDraftSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type DeleteDraftSession404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response DeleteDraftSession404JSONResponse) VisitDeleteDraftSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type DeleteDraftSession500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response DeleteDraftSession500JSONResponse) VisitDeleteDraftSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type LaunchDraftSessionRequestObject struct {
+	Id   SessionId `json:"id"`
+	Body *LaunchDraftSessionJSONRequestBody
+}
+
+type LaunchDraftSessionResponseObject interface {
+	VisitLaunchDraftSessionResponse(w http.ResponseWriter) error
+}
+
+type LaunchDraftSession200JSONResponse SessionResponse
+
+func (response LaunchDraftSession200JSONResponse) VisitLaunchDraftSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type LaunchDraftSession400JSONResponse ErrorResponse
+
+func (response LaunchDraftSession400JSONResponse) VisitLaunchDraftSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type LaunchDraftSession404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response LaunchDraftSession404JSONResponse) VisitLaunchDraftSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type LaunchDraftSession422JSONResponse DirectoryNotFoundResponse
+
+func (response LaunchDraftSession422JSONResponse) VisitLaunchDraftSessionResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(422)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type LaunchDraftSession500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response LaunchDraftSession500JSONResponse) VisitLaunchDraftSessionResponse(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(500)
 
@@ -1898,6 +2744,41 @@ func (response GetSessionSnapshots500JSONResponse) VisitGetSessionSnapshotsRespo
 	return json.NewEncoder(w).Encode(response)
 }
 
+type GetSlashCommandsRequestObject struct {
+	Params GetSlashCommandsParams
+}
+
+type GetSlashCommandsResponseObject interface {
+	VisitGetSlashCommandsResponse(w http.ResponseWriter) error
+}
+
+type GetSlashCommands200JSONResponse SlashCommandsResponse
+
+func (response GetSlashCommands200JSONResponse) VisitGetSlashCommandsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetSlashCommands400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response GetSlashCommands400JSONResponse) VisitGetSlashCommandsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetSlashCommands500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response GetSlashCommands500JSONResponse) VisitGetSlashCommandsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type GetUserSettingsRequestObject struct {
 }
 
@@ -1958,8 +2839,37 @@ func (response UpdateUserSettings500JSONResponse) VisitUpdateUserSettingsRespons
 	return json.NewEncoder(w).Encode(response)
 }
 
+type ValidateDirectoryRequestObject struct {
+	Body *ValidateDirectoryJSONRequestBody
+}
+
+type ValidateDirectoryResponseObject interface {
+	VisitValidateDirectoryResponse(w http.ResponseWriter) error
+}
+
+type ValidateDirectory200JSONResponse ValidateDirectoryResponse
+
+func (response ValidateDirectory200JSONResponse) VisitValidateDirectoryResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ValidateDirectory500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response ValidateDirectory500JSONResponse) VisitValidateDirectoryResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+	// Discover available agents
+	// (POST /agents/discover)
+	DiscoverAgents(ctx context.Context, request DiscoverAgentsRequestObject) (DiscoverAgentsResponseObject, error)
 	// List approval requests
 	// (GET /approvals)
 	ListApprovals(ctx context.Context, request ListApprovalsRequestObject) (ListApprovalsResponseObject, error)
@@ -1981,6 +2891,12 @@ type StrictServerInterface interface {
 	// Get debug information
 	// (GET /debug-info)
 	GetDebugInfo(ctx context.Context, request GetDebugInfoRequestObject) (GetDebugInfoResponseObject, error)
+	// Create a directory
+	// (POST /directories)
+	CreateDirectory(ctx context.Context, request CreateDirectoryRequestObject) (CreateDirectoryResponseObject, error)
+	// Fuzzy search for files and folders
+	// (POST /fuzzy-search/files)
+	FuzzySearchFiles(ctx context.Context, request FuzzySearchFilesRequestObject) (FuzzySearchFilesResponseObject, error)
 	// Health check
 	// (GET /health)
 	GetHealth(ctx context.Context, request GetHealthRequestObject) (GetHealthResponseObject, error)
@@ -1996,6 +2912,12 @@ type StrictServerInterface interface {
 	// Bulk archive/unarchive sessions
 	// (POST /sessions/archive)
 	BulkArchiveSessions(ctx context.Context, request BulkArchiveSessionsRequestObject) (BulkArchiveSessionsResponseObject, error)
+	// Restore multiple discarded draft sessions
+	// (POST /sessions/restore)
+	BulkRestoreDrafts(ctx context.Context, request BulkRestoreDraftsRequestObject) (BulkRestoreDraftsResponseObject, error)
+	// Search sessions by title
+	// (GET /sessions/search)
+	SearchSessions(ctx context.Context, request SearchSessionsRequestObject) (SearchSessionsResponseObject, error)
 	// Get session details
 	// (GET /sessions/{id})
 	GetSession(ctx context.Context, request GetSessionRequestObject) (GetSessionResponseObject, error)
@@ -2005,21 +2927,36 @@ type StrictServerInterface interface {
 	// Continue or fork a session
 	// (POST /sessions/{id}/continue)
 	ContinueSession(ctx context.Context, request ContinueSessionRequestObject) (ContinueSessionResponseObject, error)
+	// Permanently delete an empty draft session
+	// (DELETE /sessions/{id}/hard-delete-empty)
+	HardDeleteEmptyDraftSession(ctx context.Context, request HardDeleteEmptyDraftSessionRequestObject) (HardDeleteEmptyDraftSessionResponseObject, error)
 	// Interrupt a running session
 	// (POST /sessions/{id}/interrupt)
 	InterruptSession(ctx context.Context, request InterruptSessionRequestObject) (InterruptSessionResponseObject, error)
+	// Delete a draft session
+	// (DELETE /sessions/{id}/launch)
+	DeleteDraftSession(ctx context.Context, request DeleteDraftSessionRequestObject) (DeleteDraftSessionResponseObject, error)
+	// Launch a draft session
+	// (POST /sessions/{id}/launch)
+	LaunchDraftSession(ctx context.Context, request LaunchDraftSessionRequestObject) (LaunchDraftSessionResponseObject, error)
 	// Get conversation messages
 	// (GET /sessions/{id}/messages)
 	GetSessionMessages(ctx context.Context, request GetSessionMessagesRequestObject) (GetSessionMessagesResponseObject, error)
 	// Get file snapshots
 	// (GET /sessions/{id}/snapshots)
 	GetSessionSnapshots(ctx context.Context, request GetSessionSnapshotsRequestObject) (GetSessionSnapshotsResponseObject, error)
+	// Get available slash commands
+	// (GET /slash-commands)
+	GetSlashCommands(ctx context.Context, request GetSlashCommandsRequestObject) (GetSlashCommandsResponseObject, error)
 	// Get user settings
 	// (GET /user-settings)
 	GetUserSettings(ctx context.Context, request GetUserSettingsRequestObject) (GetUserSettingsResponseObject, error)
 	// Update user settings
 	// (PATCH /user-settings)
 	UpdateUserSettings(ctx context.Context, request UpdateUserSettingsRequestObject) (UpdateUserSettingsResponseObject, error)
+	// Validate directory existence
+	// (POST /validate-directory)
+	ValidateDirectory(ctx context.Context, request ValidateDirectoryRequestObject) (ValidateDirectoryResponseObject, error)
 }
 
 type StrictHandlerFunc = strictgin.StrictGinHandlerFunc
@@ -2032,6 +2969,39 @@ func NewStrictHandler(ssi StrictServerInterface, middlewares []StrictMiddlewareF
 type strictHandler struct {
 	ssi         StrictServerInterface
 	middlewares []StrictMiddlewareFunc
+}
+
+// DiscoverAgents operation middleware
+func (sh *strictHandler) DiscoverAgents(ctx *gin.Context) {
+	var request DiscoverAgentsRequestObject
+
+	var body DiscoverAgentsJSONRequestBody
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		ctx.Status(http.StatusBadRequest)
+		ctx.Error(err)
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.DiscoverAgents(ctx, request.(DiscoverAgentsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DiscoverAgents")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		ctx.Error(err)
+		ctx.Status(http.StatusInternalServerError)
+	} else if validResponse, ok := response.(DiscoverAgentsResponseObject); ok {
+		if err := validResponse.VisitDiscoverAgentsResponse(ctx.Writer); err != nil {
+			ctx.Error(err)
+		}
+	} else if response != nil {
+		ctx.Error(fmt.Errorf("unexpected response type: %T", response))
+	}
 }
 
 // ListApprovals operation middleware
@@ -2239,6 +3209,72 @@ func (sh *strictHandler) GetDebugInfo(ctx *gin.Context) {
 	}
 }
 
+// CreateDirectory operation middleware
+func (sh *strictHandler) CreateDirectory(ctx *gin.Context) {
+	var request CreateDirectoryRequestObject
+
+	var body CreateDirectoryJSONRequestBody
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		ctx.Status(http.StatusBadRequest)
+		ctx.Error(err)
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateDirectory(ctx, request.(CreateDirectoryRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateDirectory")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		ctx.Error(err)
+		ctx.Status(http.StatusInternalServerError)
+	} else if validResponse, ok := response.(CreateDirectoryResponseObject); ok {
+		if err := validResponse.VisitCreateDirectoryResponse(ctx.Writer); err != nil {
+			ctx.Error(err)
+		}
+	} else if response != nil {
+		ctx.Error(fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// FuzzySearchFiles operation middleware
+func (sh *strictHandler) FuzzySearchFiles(ctx *gin.Context) {
+	var request FuzzySearchFilesRequestObject
+
+	var body FuzzySearchFilesJSONRequestBody
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		ctx.Status(http.StatusBadRequest)
+		ctx.Error(err)
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.FuzzySearchFiles(ctx, request.(FuzzySearchFilesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "FuzzySearchFiles")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		ctx.Error(err)
+		ctx.Status(http.StatusInternalServerError)
+	} else if validResponse, ok := response.(FuzzySearchFilesResponseObject); ok {
+		if err := validResponse.VisitFuzzySearchFilesResponse(ctx.Writer); err != nil {
+			ctx.Error(err)
+		}
+	} else if response != nil {
+		ctx.Error(fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetHealth operation middleware
 func (sh *strictHandler) GetHealth(ctx *gin.Context) {
 	var request GetHealthRequestObject
@@ -2384,6 +3420,66 @@ func (sh *strictHandler) BulkArchiveSessions(ctx *gin.Context) {
 	}
 }
 
+// BulkRestoreDrafts operation middleware
+func (sh *strictHandler) BulkRestoreDrafts(ctx *gin.Context) {
+	var request BulkRestoreDraftsRequestObject
+
+	var body BulkRestoreDraftsJSONRequestBody
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		ctx.Status(http.StatusBadRequest)
+		ctx.Error(err)
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.BulkRestoreDrafts(ctx, request.(BulkRestoreDraftsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "BulkRestoreDrafts")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		ctx.Error(err)
+		ctx.Status(http.StatusInternalServerError)
+	} else if validResponse, ok := response.(BulkRestoreDraftsResponseObject); ok {
+		if err := validResponse.VisitBulkRestoreDraftsResponse(ctx.Writer); err != nil {
+			ctx.Error(err)
+		}
+	} else if response != nil {
+		ctx.Error(fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// SearchSessions operation middleware
+func (sh *strictHandler) SearchSessions(ctx *gin.Context, params SearchSessionsParams) {
+	var request SearchSessionsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.SearchSessions(ctx, request.(SearchSessionsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "SearchSessions")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		ctx.Error(err)
+		ctx.Status(http.StatusInternalServerError)
+	} else if validResponse, ok := response.(SearchSessionsResponseObject); ok {
+		if err := validResponse.VisitSearchSessionsResponse(ctx.Writer); err != nil {
+			ctx.Error(err)
+		}
+	} else if response != nil {
+		ctx.Error(fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetSession operation middleware
 func (sh *strictHandler) GetSession(ctx *gin.Context, id SessionId) {
 	var request GetSessionRequestObject
@@ -2481,6 +3577,33 @@ func (sh *strictHandler) ContinueSession(ctx *gin.Context, id SessionId) {
 	}
 }
 
+// HardDeleteEmptyDraftSession operation middleware
+func (sh *strictHandler) HardDeleteEmptyDraftSession(ctx *gin.Context, id SessionId) {
+	var request HardDeleteEmptyDraftSessionRequestObject
+
+	request.Id = id
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.HardDeleteEmptyDraftSession(ctx, request.(HardDeleteEmptyDraftSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "HardDeleteEmptyDraftSession")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		ctx.Error(err)
+		ctx.Status(http.StatusInternalServerError)
+	} else if validResponse, ok := response.(HardDeleteEmptyDraftSessionResponseObject); ok {
+		if err := validResponse.VisitHardDeleteEmptyDraftSessionResponse(ctx.Writer); err != nil {
+			ctx.Error(err)
+		}
+	} else if response != nil {
+		ctx.Error(fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // InterruptSession operation middleware
 func (sh *strictHandler) InterruptSession(ctx *gin.Context, id SessionId) {
 	var request InterruptSessionRequestObject
@@ -2501,6 +3624,68 @@ func (sh *strictHandler) InterruptSession(ctx *gin.Context, id SessionId) {
 		ctx.Status(http.StatusInternalServerError)
 	} else if validResponse, ok := response.(InterruptSessionResponseObject); ok {
 		if err := validResponse.VisitInterruptSessionResponse(ctx.Writer); err != nil {
+			ctx.Error(err)
+		}
+	} else if response != nil {
+		ctx.Error(fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteDraftSession operation middleware
+func (sh *strictHandler) DeleteDraftSession(ctx *gin.Context, id SessionId) {
+	var request DeleteDraftSessionRequestObject
+
+	request.Id = id
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteDraftSession(ctx, request.(DeleteDraftSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteDraftSession")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		ctx.Error(err)
+		ctx.Status(http.StatusInternalServerError)
+	} else if validResponse, ok := response.(DeleteDraftSessionResponseObject); ok {
+		if err := validResponse.VisitDeleteDraftSessionResponse(ctx.Writer); err != nil {
+			ctx.Error(err)
+		}
+	} else if response != nil {
+		ctx.Error(fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// LaunchDraftSession operation middleware
+func (sh *strictHandler) LaunchDraftSession(ctx *gin.Context, id SessionId) {
+	var request LaunchDraftSessionRequestObject
+
+	request.Id = id
+
+	var body LaunchDraftSessionJSONRequestBody
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		ctx.Status(http.StatusBadRequest)
+		ctx.Error(err)
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.LaunchDraftSession(ctx, request.(LaunchDraftSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "LaunchDraftSession")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		ctx.Error(err)
+		ctx.Status(http.StatusInternalServerError)
+	} else if validResponse, ok := response.(LaunchDraftSessionResponseObject); ok {
+		if err := validResponse.VisitLaunchDraftSessionResponse(ctx.Writer); err != nil {
 			ctx.Error(err)
 		}
 	} else if response != nil {
@@ -2555,6 +3740,33 @@ func (sh *strictHandler) GetSessionSnapshots(ctx *gin.Context, id SessionId) {
 		ctx.Status(http.StatusInternalServerError)
 	} else if validResponse, ok := response.(GetSessionSnapshotsResponseObject); ok {
 		if err := validResponse.VisitGetSessionSnapshotsResponse(ctx.Writer); err != nil {
+			ctx.Error(err)
+		}
+	} else if response != nil {
+		ctx.Error(fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetSlashCommands operation middleware
+func (sh *strictHandler) GetSlashCommands(ctx *gin.Context, params GetSlashCommandsParams) {
+	var request GetSlashCommandsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.GetSlashCommands(ctx, request.(GetSlashCommandsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetSlashCommands")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		ctx.Error(err)
+		ctx.Status(http.StatusInternalServerError)
+	} else if validResponse, ok := response.(GetSlashCommandsResponseObject); ok {
+		if err := validResponse.VisitGetSlashCommandsResponse(ctx.Writer); err != nil {
 			ctx.Error(err)
 		}
 	} else if response != nil {
@@ -2620,115 +3832,190 @@ func (sh *strictHandler) UpdateUserSettings(ctx *gin.Context) {
 	}
 }
 
+// ValidateDirectory operation middleware
+func (sh *strictHandler) ValidateDirectory(ctx *gin.Context) {
+	var request ValidateDirectoryRequestObject
+
+	var body ValidateDirectoryJSONRequestBody
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		ctx.Status(http.StatusBadRequest)
+		ctx.Error(err)
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx *gin.Context, request interface{}) (interface{}, error) {
+		return sh.ssi.ValidateDirectory(ctx, request.(ValidateDirectoryRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ValidateDirectory")
+	}
+
+	response, err := handler(ctx, request)
+
+	if err != nil {
+		ctx.Error(err)
+		ctx.Status(http.StatusInternalServerError)
+	} else if validResponse, ok := response.(ValidateDirectoryResponseObject); ok {
+		if err := validResponse.VisitValidateDirectoryResponse(ctx.Writer); err != nil {
+			ctx.Error(err)
+		}
+	} else if response != nil {
+		ctx.Error(fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // Base64 encoded, gzipped, json marshaled Swagger object
 var swaggerSpec = []string{
 
-	"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",
-	"AAA=",
+	"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",
 }
 
 // GetSwagger returns the content of the embedded swagger specification file

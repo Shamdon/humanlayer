@@ -720,3 +720,288 @@ func TestFileSnapshots(t *testing.T) {
 		require.True(t, found, "Special character snapshot not found")
 	})
 }
+
+func TestSearchSessionsByTitle(t *testing.T) {
+	// Create temp database
+	dbPath := testutil.DatabasePath(t, "sqlite-search")
+	store, err := NewSQLiteStore(dbPath)
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+
+	// Create test sessions with various titles
+	sessions := []*Session{
+		{
+			ID:             "sess1",
+			RunID:          "run1",
+			Title:          "Implement authentication",
+			Query:          "Help with auth",
+			Status:         SessionStatusCompleted,
+			CreatedAt:      time.Now().Add(-2 * time.Hour),
+			LastActivityAt: time.Now().Add(-1 * time.Hour),
+		},
+		{
+			ID:             "sess2",
+			RunID:          "run2",
+			Title:          "Fix authentication bug",
+			Query:          "Debug auth issue",
+			Status:         SessionStatusCompleted,
+			CreatedAt:      time.Now().Add(-3 * time.Hour),
+			LastActivityAt: time.Now().Add(-2 * time.Hour),
+		},
+		{
+			ID:             "sess3",
+			RunID:          "run3",
+			Title:          "Add user profile",
+			Query:          "Create profile page",
+			Status:         SessionStatusCompleted,
+			CreatedAt:      time.Now().Add(-1 * time.Hour),
+			LastActivityAt: time.Now().Add(-100 * time.Millisecond),
+		},
+		{
+			ID:             "sess4",
+			RunID:          "run4",
+			Title:          "", // Empty title
+			Query:          "Some query",
+			Status:         SessionStatusCompleted,
+			CreatedAt:      time.Now(),
+			LastActivityAt: time.Now(),
+		},
+	}
+
+	for _, s := range sessions {
+		err := store.CreateSession(ctx, s)
+		require.NoError(t, err)
+	}
+
+	t.Run("search by partial title", func(t *testing.T) {
+		results, err := store.SearchSessionsByTitle(ctx, "auth", 10)
+		require.NoError(t, err)
+		require.Len(t, results, 2, "Should find both authentication sessions")
+
+		// Should be ordered by last_activity_at DESC
+		require.Equal(t, "sess1", results[0].ID)
+		require.Equal(t, "sess2", results[1].ID)
+	})
+
+	t.Run("case insensitive search", func(t *testing.T) {
+		// SQL LIKE is case-insensitive by default in SQLite
+		results, err := store.SearchSessionsByTitle(ctx, "AUTH", 10)
+		require.NoError(t, err)
+		require.Len(t, results, 2, "Should find sessions with case-insensitive search")
+	})
+
+	t.Run("empty query returns recent sessions", func(t *testing.T) {
+		results, err := store.SearchSessionsByTitle(ctx, "", 10)
+		require.NoError(t, err)
+		require.Len(t, results, 4, "Should return all sessions")
+
+		// Should be ordered by last_activity_at DESC
+		require.Equal(t, "sess4", results[0].ID, "Most recent session first")
+		require.Equal(t, "sess3", results[1].ID)
+		require.Equal(t, "sess1", results[2].ID)
+		require.Equal(t, "sess2", results[3].ID)
+	})
+
+	t.Run("respects limit", func(t *testing.T) {
+		results, err := store.SearchSessionsByTitle(ctx, "", 2)
+		require.NoError(t, err)
+		require.Len(t, results, 2, "Should respect the limit")
+
+		// Should get the 2 most recent sessions
+		require.Equal(t, "sess4", results[0].ID)
+		require.Equal(t, "sess3", results[1].ID)
+	})
+
+	t.Run("no results", func(t *testing.T) {
+		results, err := store.SearchSessionsByTitle(ctx, "nonexistent", 10)
+		require.NoError(t, err)
+		require.Empty(t, results, "Should return empty for non-matching query")
+	})
+
+	t.Run("special characters in search", func(t *testing.T) {
+		// Create a session with special characters in title
+		specialSession := &Session{
+			ID:             "sess-special",
+			RunID:          "run-special",
+			Title:          "Fix SQL injection' OR '1'='1",
+			Query:          "Security fix",
+			Status:         SessionStatusCompleted,
+			CreatedAt:      time.Now(),
+			LastActivityAt: time.Now(),
+		}
+		err := store.CreateSession(ctx, specialSession)
+		require.NoError(t, err)
+
+		// Search with special characters (they should be escaped by the LIKE query)
+		results, err := store.SearchSessionsByTitle(ctx, "SQL injection", 10)
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		require.Equal(t, "sess-special", results[0].ID)
+	})
+
+	t.Run("handles maximum limit", func(t *testing.T) {
+		results, err := store.SearchSessionsByTitle(ctx, "", 50)
+		require.NoError(t, err)
+		require.Len(t, results, 5, "Should return all 5 sessions when limit is 50")
+	})
+
+	t.Run("handles zero limit", func(t *testing.T) {
+		results, err := store.SearchSessionsByTitle(ctx, "auth", 0)
+		require.NoError(t, err)
+		// Zero limit should use default of 10
+		require.Len(t, results, 2, "Should return matching sessions with default limit")
+	})
+
+	t.Run("handles excessive limit", func(t *testing.T) {
+		results, err := store.SearchSessionsByTitle(ctx, "", 100)
+		require.NoError(t, err)
+		// Should be capped at 50 in the implementation
+		require.Len(t, results, 5, "Should return all sessions but respect max limit")
+	})
+
+	t.Run("filters to only leaf sessions", func(t *testing.T) {
+		// Create parent-child session hierarchy
+		parentSession := &Session{
+			ID:             "parent-sess",
+			RunID:          "parent-run",
+			Title:          "Parent session for filtering test",
+			Query:          "Parent query",
+			Status:         SessionStatusCompleted,
+			CreatedAt:      time.Now(),
+			LastActivityAt: time.Now(),
+		}
+		err := store.CreateSession(ctx, parentSession)
+		require.NoError(t, err)
+
+		childSession := &Session{
+			ID:              "child-sess",
+			RunID:           "child-run",
+			ParentSessionID: "parent-sess",
+			Title:           "Child session for filtering test",
+			Query:           "Child query",
+			Status:          SessionStatusCompleted,
+			CreatedAt:       time.Now(),
+			LastActivityAt:  time.Now(),
+		}
+		err = store.CreateSession(ctx, childSession)
+		require.NoError(t, err)
+
+		// Search for "filtering test" should only return child (leaf) session
+		results, err := store.SearchSessionsByTitle(ctx, "filtering test", 10)
+		require.NoError(t, err)
+		require.Len(t, results, 1, "Should only return leaf session")
+		require.Equal(t, "child-sess", results[0].ID, "Should return child session, not parent")
+	})
+
+	t.Run("excludes archived sessions", func(t *testing.T) {
+		archivedSession := &Session{
+			ID:             "archived-sess",
+			RunID:          "archived-run",
+			Title:          "Archived session test",
+			Query:          "Archived query",
+			Status:         SessionStatusCompleted,
+			Archived:       true,
+			CreatedAt:      time.Now(),
+			LastActivityAt: time.Now(),
+		}
+		err := store.CreateSession(ctx, archivedSession)
+		require.NoError(t, err)
+
+		// Search should not return archived session
+		results, err := store.SearchSessionsByTitle(ctx, "Archived session", 10)
+		require.NoError(t, err)
+		require.Empty(t, results, "Should not return archived sessions")
+	})
+
+	t.Run("excludes draft sessions", func(t *testing.T) {
+		draftSession := &Session{
+			ID:             "draft-sess",
+			RunID:          "draft-run",
+			Title:          "Draft session test",
+			Query:          "Draft query",
+			Status:         SessionStatusDraft,
+			CreatedAt:      time.Now(),
+			LastActivityAt: time.Now(),
+		}
+		err := store.CreateSession(ctx, draftSession)
+		require.NoError(t, err)
+
+		// Search should not return draft session
+		results, err := store.SearchSessionsByTitle(ctx, "Draft session", 10)
+		require.NoError(t, err)
+		require.Empty(t, results, "Should not return draft sessions")
+	})
+
+	t.Run("excludes discarded sessions", func(t *testing.T) {
+		discardedSession := &Session{
+			ID:             "discarded-sess",
+			RunID:          "discarded-run",
+			Title:          "Discarded session test",
+			Query:          "Discarded query",
+			Status:         SessionStatusDiscarded,
+			CreatedAt:      time.Now(),
+			LastActivityAt: time.Now(),
+		}
+		err := store.CreateSession(ctx, discardedSession)
+		require.NoError(t, err)
+
+		// Search should not return discarded session
+		results, err := store.SearchSessionsByTitle(ctx, "Discarded session", 10)
+		require.NoError(t, err)
+		require.Empty(t, results, "Should not return discarded sessions")
+	})
+
+	t.Run("searches across title, summary, and query fields", func(t *testing.T) {
+		// Create sessions with search text in different fields
+		titleOnlySession := &Session{
+			ID:             "title-only-sess",
+			RunID:          "title-only-run",
+			Title:          "Contains searchable text",
+			Summary:        "Different summary",
+			Query:          "Different query",
+			Status:         SessionStatusCompleted,
+			CreatedAt:      time.Now().Add(-3 * time.Hour),
+			LastActivityAt: time.Now().Add(-3 * time.Hour),
+		}
+		err := store.CreateSession(ctx, titleOnlySession)
+		require.NoError(t, err)
+
+		summaryOnlySession := &Session{
+			ID:             "summary-only-sess",
+			RunID:          "summary-only-run",
+			Title:          "Different title",
+			Summary:        "Contains searchable text",
+			Query:          "Different query",
+			Status:         SessionStatusCompleted,
+			CreatedAt:      time.Now().Add(-2 * time.Hour),
+			LastActivityAt: time.Now().Add(-2 * time.Hour),
+		}
+		err = store.CreateSession(ctx, summaryOnlySession)
+		require.NoError(t, err)
+
+		queryOnlySession := &Session{
+			ID:             "query-only-sess",
+			RunID:          "query-only-run",
+			Title:          "Different title",
+			Summary:        "Different summary",
+			Query:          "Contains searchable text",
+			Status:         SessionStatusCompleted,
+			CreatedAt:      time.Now().Add(-1 * time.Hour),
+			LastActivityAt: time.Now().Add(-1 * time.Hour),
+		}
+		err = store.CreateSession(ctx, queryOnlySession)
+		require.NoError(t, err)
+
+		// Search should find all three sessions
+		results, err := store.SearchSessionsByTitle(ctx, "searchable", 10)
+		require.NoError(t, err)
+		require.Len(t, results, 3, "Should find sessions with search term in title, summary, or query")
+
+		// Should be ordered by last_activity_at DESC (most recent first)
+		require.Equal(t, "query-only-sess", results[0].ID, "Most recent session first")
+		require.Equal(t, "summary-only-sess", results[1].ID)
+		require.Equal(t, "title-only-sess", results[2].ID)
+	})
+}

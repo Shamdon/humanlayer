@@ -8,6 +8,8 @@ import type {
   Session as SDKSession,
   Approval,
   ConversationEvent,
+  Agent,
+  FuzzySearchFilesResponse,
 } from '@humanlayer/hld-sdk'
 
 // Re-export SDK types and values
@@ -16,7 +18,7 @@ export type { Event, EventType }
 export type RecentPath = SDKRecentPath
 
 // Export SDK types directly
-export type { Approval } from '@humanlayer/hld-sdk'
+export type { Approval, Agent } from '@humanlayer/hld-sdk'
 
 // Extend SDK Session type with WUI-specific properties
 export interface Session extends SDKSession {
@@ -42,6 +44,7 @@ export interface LaunchSessionParams {
   dangerouslySkipPermissions?: boolean
   proxyApiKey?: string
   additionalDirectories?: string[]
+  draft?: boolean // Add draft parameter
   // Add any WUI-specific extensions if needed
 }
 
@@ -79,11 +82,20 @@ export interface DaemonClient {
 
   // Session methods
   launchSession(params: LaunchSessionParams | LaunchSessionRequest): Promise<CreateSessionResponseData>
+  getSlashCommands(params: {
+    workingDir: string
+    query?: string
+  }): Promise<{ data: Array<{ name: string; source: 'local' | 'global' }> }>
+  searchSessions(params: { query?: string; limit?: number }): Promise<{ data: Session[] }>
   listSessions(): Promise<Session[]>
-  getSessionLeaves(request?: {
-    include_archived?: boolean
-    archived_only?: boolean
-  }): Promise<{ sessions: Session[] }>
+  getSessionLeaves(request?: { filter?: 'normal' | 'archived' | 'draft' }): Promise<{
+    sessions: Session[]
+    counts?: {
+      normal?: number
+      archived?: number
+      draft?: number
+    }
+  }>
   getSessionState(sessionId: string): Promise<SessionState>
   continueSession(
     sessionId: string,
@@ -103,6 +115,16 @@ export interface DaemonClient {
     updates: {
       model?: string
       title?: string
+      archived?: boolean
+      autoAcceptEdits?: boolean
+      dangerouslySkipPermissions?: boolean
+      dangerouslySkipPermissionsTimeoutMs?: number
+      additionalDirectories?: string[]
+      workingDir?: string
+      proxyEnabled?: boolean
+      proxyBaseUrl?: string
+      proxyModelOverride?: string
+      proxyApiKey?: string
     },
   ): Promise<{ success: boolean }>
   archiveSession(
@@ -142,6 +164,14 @@ export interface DaemonClient {
   // Utility methods
   getRecentPaths(limit?: number): Promise<RecentPath[]>
   getDebugInfo(): Promise<DebugInfo>
+  fuzzySearchFiles(params: {
+    query: string
+    paths: string[]
+    limit?: number
+    filesOnly?: boolean
+    respectGitignore?: boolean
+  }): Promise<FuzzySearchFilesResponse>
+  discoverAgents(workingDir: string): Promise<Agent[]>
 }
 
 // Legacy enums and types for backward compatibility (to be gradually removed)
@@ -167,6 +197,7 @@ export enum ConversationRole {
 export enum ViewMode {
   Normal = 'normal',
   Archived = 'archived',
+  Drafts = 'drafts',
 }
 
 // Legacy request/response types (for gradual migration)
@@ -192,6 +223,7 @@ export interface LaunchSessionRequest {
   proxy_base_url?: string
   proxy_model_override?: string
   proxy_api_key?: string
+  draft?: boolean // Add draft parameter
 }
 
 export interface LaunchSessionResponse {

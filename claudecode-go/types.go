@@ -15,6 +15,7 @@ type Model string
 const (
 	ModelOpus   Model = "opus"
 	ModelSonnet Model = "sonnet"
+	ModelHaiku  Model = "haiku"
 )
 
 // OutputFormat specifies the output format for Claude CLI
@@ -51,7 +52,8 @@ type SessionConfig struct {
 	Query string
 
 	// Session management
-	SessionID string // If set, resumes this session
+	SessionID   string // If set, resumes this session
+	ForkSession bool   // If true with SessionID, forks instead of resuming
 
 	// Optional
 	Model                 Model
@@ -256,6 +258,7 @@ type ModelUsageDetail struct {
 	CacheCreationInputTokens int     `json:"cacheCreationInputTokens"`
 	WebSearchRequests        int     `json:"webSearchRequests"`
 	CostUSD                  float64 `json:"costUSD"`
+	ContextWindow            int     `json:"contextWindow,omitempty"`
 }
 
 // Result represents the final result of a Claude session

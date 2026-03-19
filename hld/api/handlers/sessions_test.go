@@ -46,8 +46,8 @@ func TestSessionHandlers_CreateSession(t *testing.T) {
 			},
 			mockSetup: func() {
 				mockManager.EXPECT().
-					LaunchSession(gomock.Any(), gomock.Any()).
-					DoAndReturn(func(ctx context.Context, config session.LaunchSessionConfig) (*session.Session, error) {
+					LaunchSession(gomock.Any(), gomock.Any(), gomock.Any()).
+					DoAndReturn(func(ctx context.Context, config session.LaunchSessionConfig, isDraft bool) (*session.Session, error) {
 						// Validate the config passed to LaunchSession
 						assert.Equal(t, "Help me write tests", config.Query)
 						assert.Equal(t, claudecode.Model("sonnet"), config.Model)
@@ -72,7 +72,7 @@ func TestSessionHandlers_CreateSession(t *testing.T) {
 			},
 			mockSetup: func() {
 				mockManager.EXPECT().
-					LaunchSession(gomock.Any(), gomock.Any()).
+					LaunchSession(gomock.Any(), gomock.Any(), gomock.Any()).
 					Return(nil, fmt.Errorf("failed to start Claude"))
 			},
 			expectedStatus: 500,
@@ -100,8 +100,8 @@ func TestSessionHandlers_CreateSession(t *testing.T) {
 			},
 			mockSetup: func() {
 				mockManager.EXPECT().
-					LaunchSession(gomock.Any(), gomock.Any()).
-					DoAndReturn(func(ctx context.Context, config session.LaunchSessionConfig) (*session.Session, error) {
+					LaunchSession(gomock.Any(), gomock.Any(), gomock.Any()).
+					DoAndReturn(func(ctx context.Context, config session.LaunchSessionConfig, isDraft bool) (*session.Session, error) {
 						// Verify MCP config was properly converted
 						require.NotNil(t, config.MCPConfig)
 						assert.Len(t, config.MCPConfig.MCPServers, 1)
@@ -216,12 +216,12 @@ func TestSessionHandlers_ListSessions(t *testing.T) {
 		assert.False(t, foundIDs["sess-1"]) // Not a leaf
 	})
 
-	t.Run("list all sessions with leafOnly=false", func(t *testing.T) {
+	t.Run("list all sessions with leavesOnly=false", func(t *testing.T) {
 		mockManager.EXPECT().
 			ListSessions().
 			Return(sessionInfos)
 
-		w := makeRequest(t, router, "GET", "/api/v1/sessions?leafOnly=false", nil)
+		w := makeRequest(t, router, "GET", "/api/v1/sessions?leavesOnly=false", nil)
 
 		var resp struct {
 			Data []api.Session `json:"data"`
@@ -231,7 +231,7 @@ func TestSessionHandlers_ListSessions(t *testing.T) {
 		assert.Len(t, resp.Data, 3)
 	})
 
-	t.Run("filter archived sessions", func(t *testing.T) {
+	t.Run("filter normal sessions", func(t *testing.T) {
 		archivedSessions := append(sessionInfos, session.Info{
 			ID:             "sess-archived",
 			RunID:          "run-archived",
@@ -246,8 +246,8 @@ func TestSessionHandlers_ListSessions(t *testing.T) {
 			ListSessions().
 			Return(archivedSessions)
 
-		// Default should exclude archived
-		w := makeRequest(t, router, "GET", "/api/v1/sessions", nil)
+		// filter=normal should exclude archived
+		w := makeRequest(t, router, "GET", "/api/v1/sessions?filter=normal", nil)
 
 		var resp struct {
 			Data []api.Session `json:"data"`
@@ -499,6 +499,148 @@ func TestSessionHandlers_UpdateSession(t *testing.T) {
 		assertErrorResponse(t, w, "HLD-1002", "Session not found")
 		assert.Equal(t, 404, w.Code)
 	})
+
+	t.Run("auto-approve pending approvals when bypass permissions enabled", func(t *testing.T) {
+		mockManager.EXPECT().
+			UpdateSessionSettings(gomock.Any(), "sess-auto", store.SessionUpdate{
+				DangerouslySkipPermissions: boolPtr(true),
+			}).
+			Return(nil)
+
+		// Mock getting pending approvals
+		pendingApprovals := []*store.Approval{
+			{
+				ID:        "approval-1",
+				SessionID: "sess-auto",
+				ToolName:  "Bash",
+				Status:    store.ApprovalStatusLocalPending,
+			},
+			{
+				ID:        "approval-2",
+				SessionID: "sess-auto",
+				ToolName:  "Write",
+				Status:    store.ApprovalStatusLocalPending,
+			},
+		}
+
+		mockApprovalManager.EXPECT().
+			GetPendingApprovals(gomock.Any(), "sess-auto").
+			Return(pendingApprovals, nil)
+
+		// Expect each approval to be auto-approved
+		mockApprovalManager.EXPECT().
+			ApproveToolCall(gomock.Any(), "approval-1", "Auto-approved due to bypass permissions").
+			Return(nil)
+		mockApprovalManager.EXPECT().
+			ApproveToolCall(gomock.Any(), "approval-2", "Auto-approved due to bypass permissions").
+			Return(nil)
+
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), "sess-auto").
+			Return(&store.Session{
+				ID:                         "sess-auto",
+				RunID:                      "run-auto",
+				Status:                     "running",
+				Query:                      "Test query",
+				CreatedAt:                  time.Now().Add(-10 * time.Minute),
+				LastActivityAt:             time.Now(),
+				DangerouslySkipPermissions: true,
+				Archived:                   false,
+			}, nil)
+
+		updateReq := api.UpdateSessionRequest{
+			DangerouslySkipPermissions: boolPtr(true),
+		}
+		w := makeRequest(t, router, "PATCH", "/api/v1/sessions/sess-auto", updateReq)
+
+		var resp struct {
+			Data api.Session `json:"data"`
+		}
+		assertJSONResponse(t, w, 200, &resp)
+
+		assert.Equal(t, "sess-auto", resp.Data.Id)
+		assert.NotNil(t, resp.Data.DangerouslySkipPermissions)
+		assert.True(t, *resp.Data.DangerouslySkipPermissions)
+	})
+
+	t.Run("auto-approve handles errors gracefully", func(t *testing.T) {
+		mockManager.EXPECT().
+			UpdateSessionSettings(gomock.Any(), "sess-error", store.SessionUpdate{
+				DangerouslySkipPermissions: boolPtr(true),
+			}).
+			Return(nil)
+
+		// Mock getting pending approvals returns error
+		mockApprovalManager.EXPECT().
+			GetPendingApprovals(gomock.Any(), "sess-error").
+			Return(nil, fmt.Errorf("database error"))
+
+		// Should still return success since auto-approval is best-effort
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), "sess-error").
+			Return(&store.Session{
+				ID:                         "sess-error",
+				RunID:                      "run-error",
+				Status:                     "running",
+				Query:                      "Test query",
+				CreatedAt:                  time.Now().Add(-10 * time.Minute),
+				LastActivityAt:             time.Now(),
+				DangerouslySkipPermissions: true,
+				Archived:                   false,
+			}, nil)
+
+		updateReq := api.UpdateSessionRequest{
+			DangerouslySkipPermissions: boolPtr(true),
+		}
+		w := makeRequest(t, router, "PATCH", "/api/v1/sessions/sess-error", updateReq)
+
+		var resp struct {
+			Data api.Session `json:"data"`
+		}
+		assertJSONResponse(t, w, 200, &resp)
+
+		assert.Equal(t, "sess-error", resp.Data.Id)
+	})
+
+	t.Run("no auto-approve when no pending approvals", func(t *testing.T) {
+		mockManager.EXPECT().
+			UpdateSessionSettings(gomock.Any(), "sess-none", store.SessionUpdate{
+				DangerouslySkipPermissions: boolPtr(true),
+			}).
+			Return(nil)
+
+		// Mock getting pending approvals - empty list
+		mockApprovalManager.EXPECT().
+			GetPendingApprovals(gomock.Any(), "sess-none").
+			Return([]*store.Approval{}, nil)
+
+		// No calls to ApproveToolCall expected
+
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), "sess-none").
+			Return(&store.Session{
+				ID:                         "sess-none",
+				RunID:                      "run-none",
+				Status:                     "running",
+				Query:                      "Test query",
+				CreatedAt:                  time.Now().Add(-10 * time.Minute),
+				LastActivityAt:             time.Now(),
+				DangerouslySkipPermissions: true,
+				Archived:                   false,
+			}, nil)
+
+		updateReq := api.UpdateSessionRequest{
+			DangerouslySkipPermissions: boolPtr(true),
+		}
+		w := makeRequest(t, router, "PATCH", "/api/v1/sessions/sess-none", updateReq)
+
+		var resp struct {
+			Data api.Session `json:"data"`
+		}
+		assertJSONResponse(t, w, 200, &resp)
+
+		assert.Equal(t, "sess-none", resp.Data.Id)
+	})
 }
 
 func TestSessionHandlers_GetHealth(t *testing.T) {
@@ -552,6 +694,343 @@ func TestSessionHandlers_GetHealth(t *testing.T) {
 			assert.False(t, resp.Dependencies.Claude.Available)
 			assert.NotNil(t, resp.Dependencies.Claude.Error)
 		}
+	})
+}
+
+func TestSessionHandlers_LaunchDraftSession_BypassPermissionsTimerRecalculation(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockManager := session.NewMockSessionManager(ctrl)
+	mockStore := store.NewMockConversationStore(ctrl)
+	mockApprovalManager := approval.NewMockManager(ctrl)
+
+	handlers := handlers.NewSessionHandlers(mockManager, mockStore, mockApprovalManager)
+	router := setupTestRouter(t, handlers, nil, nil)
+
+	t.Run("recalculates bypass permissions timer on draft launch", func(t *testing.T) {
+		sessionID := "sess-draft-123"
+		timeoutMs := int64(900000) // 15 minutes
+
+		// Set an expiration time in the past to simulate a draft that was set up earlier
+		pastExpiration := time.Now().Add(-5 * time.Minute)
+
+		// The draft session with bypass permissions enabled
+		draftSession := &store.Session{
+			ID:                                  sessionID,
+			RunID:                               "run-draft-456",
+			Status:                              store.SessionStatusDraft,
+			Query:                               "Test draft query",
+			CreatedAt:                           time.Now().Add(-10 * time.Minute),
+			LastActivityAt:                      time.Now().Add(-10 * time.Minute),
+			DangerouslySkipPermissions:          true,
+			DangerouslySkipPermissionsExpiresAt: &pastExpiration,
+			DangerouslySkipPermissionsTimeoutMs: &timeoutMs,
+		}
+
+		// Mock getting the draft session
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), sessionID).
+			Return(draftSession, nil).
+			Times(1)
+
+		// Expect UpdateSession to be called with recalculated expiration
+		mockStore.EXPECT().
+			UpdateSession(gomock.Any(), sessionID, gomock.Any()).
+			DoAndReturn(func(ctx context.Context, id string, update store.SessionUpdate) error {
+				// Verify that the expiration was recalculated
+				require.NotNil(t, update.DangerouslySkipPermissionsExpiresAt)
+				require.NotNil(t, *update.DangerouslySkipPermissionsExpiresAt)
+
+				newExpiration := **update.DangerouslySkipPermissionsExpiresAt
+				now := time.Now()
+
+				// The new expiration should be approximately now + 15 minutes
+				expectedExpiration := now.Add(time.Duration(timeoutMs) * time.Millisecond)
+
+				// Allow 2 seconds of tolerance for test execution time
+				timeDiff := newExpiration.Sub(expectedExpiration)
+				assert.True(t, timeDiff < 2*time.Second && timeDiff > -2*time.Second,
+					"Expected expiration to be recalculated to ~15 minutes from now, got difference of %v", timeDiff)
+
+				return nil
+			}).
+			Times(1)
+
+		// Mock launching the draft session
+		mockManager.EXPECT().
+			LaunchDraftSession(gomock.Any(), sessionID, "Test prompt", false).
+			Return(nil).
+			Times(1)
+
+		// Mock getting the updated session after launch
+		launchedSession := &store.Session{
+			ID:             sessionID,
+			RunID:          "run-draft-456",
+			Status:         store.SessionStatusStarting,
+			Query:          "Test draft query",
+			CreatedAt:      time.Now().Add(-10 * time.Minute),
+			LastActivityAt: time.Now(),
+		}
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), sessionID).
+			Return(launchedSession, nil).
+			Times(1)
+
+		// Make the launch request
+		launchReq := api.LaunchDraftSessionJSONBody{
+			Prompt: "Test prompt",
+		}
+		w := makeRequest(t, router, "POST", fmt.Sprintf("/api/v1/sessions/%s/launch", sessionID), launchReq)
+
+		var resp struct {
+			Data api.Session `json:"data"`
+		}
+		assertJSONResponse(t, w, 200, &resp)
+
+		assert.Equal(t, sessionID, resp.Data.Id)
+		assert.Equal(t, api.SessionStatusStarting, resp.Data.Status)
+	})
+
+	t.Run("does not recalculate timer when bypass permissions disabled", func(t *testing.T) {
+		sessionID := "sess-draft-no-bypass"
+
+		// Draft session without bypass permissions
+		draftSession := &store.Session{
+			ID:                         sessionID,
+			RunID:                      "run-draft-789",
+			Status:                     store.SessionStatusDraft,
+			Query:                      "Test draft query",
+			CreatedAt:                  time.Now().Add(-10 * time.Minute),
+			LastActivityAt:             time.Now().Add(-10 * time.Minute),
+			DangerouslySkipPermissions: false,
+		}
+
+		// Mock getting the draft session
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), sessionID).
+			Return(draftSession, nil).
+			Times(1)
+
+		// UpdateSession should NOT be called since bypass permissions is disabled
+
+		// Mock launching the draft session
+		mockManager.EXPECT().
+			LaunchDraftSession(gomock.Any(), sessionID, "Test prompt", false).
+			Return(nil).
+			Times(1)
+
+		// Mock getting the updated session after launch
+		launchedSession := &store.Session{
+			ID:             sessionID,
+			RunID:          "run-draft-789",
+			Status:         store.SessionStatusStarting,
+			Query:          "Test draft query",
+			CreatedAt:      time.Now().Add(-10 * time.Minute),
+			LastActivityAt: time.Now(),
+		}
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), sessionID).
+			Return(launchedSession, nil).
+			Times(1)
+
+		// Make the launch request
+		launchReq := api.LaunchDraftSessionJSONBody{
+			Prompt: "Test prompt",
+		}
+		w := makeRequest(t, router, "POST", fmt.Sprintf("/api/v1/sessions/%s/launch", sessionID), launchReq)
+
+		var resp struct {
+			Data api.Session `json:"data"`
+		}
+		assertJSONResponse(t, w, 200, &resp)
+
+		assert.Equal(t, sessionID, resp.Data.Id)
+	})
+
+	t.Run("does not recalculate timer when timeout not set", func(t *testing.T) {
+		sessionID := "sess-draft-no-timeout"
+
+		// Draft session with bypass permissions but no timeout
+		draftSession := &store.Session{
+			ID:                         sessionID,
+			RunID:                      "run-draft-abc",
+			Status:                     store.SessionStatusDraft,
+			Query:                      "Test draft query",
+			CreatedAt:                  time.Now().Add(-10 * time.Minute),
+			LastActivityAt:             time.Now().Add(-10 * time.Minute),
+			DangerouslySkipPermissions: true,
+			// No timeout set - unlimited bypass
+			DangerouslySkipPermissionsTimeoutMs: nil,
+		}
+
+		// Mock getting the draft session
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), sessionID).
+			Return(draftSession, nil).
+			Times(1)
+
+		// UpdateSession should NOT be called since there's no timeout to recalculate
+
+		// Mock launching the draft session
+		mockManager.EXPECT().
+			LaunchDraftSession(gomock.Any(), sessionID, "Test prompt", false).
+			Return(nil).
+			Times(1)
+
+		// Mock getting the updated session after launch
+		launchedSession := &store.Session{
+			ID:             sessionID,
+			RunID:          "run-draft-abc",
+			Status:         store.SessionStatusStarting,
+			Query:          "Test draft query",
+			CreatedAt:      time.Now().Add(-10 * time.Minute),
+			LastActivityAt: time.Now(),
+		}
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), sessionID).
+			Return(launchedSession, nil).
+			Times(1)
+
+		// Make the launch request
+		launchReq := api.LaunchDraftSessionJSONBody{
+			Prompt: "Test prompt",
+		}
+		w := makeRequest(t, router, "POST", fmt.Sprintf("/api/v1/sessions/%s/launch", sessionID), launchReq)
+
+		var resp struct {
+			Data api.Session `json:"data"`
+		}
+		assertJSONResponse(t, w, 200, &resp)
+
+		assert.Equal(t, sessionID, resp.Data.Id)
+	})
+}
+
+func TestSessionHandlers_BulkRestoreDrafts(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockManager := session.NewMockSessionManager(ctrl)
+	mockStore := store.NewMockConversationStore(ctrl)
+	mockApprovalManager := approval.NewMockManager(ctrl)
+
+	handlers := handlers.NewSessionHandlers(mockManager, mockStore, mockApprovalManager)
+	router := setupTestRouter(t, handlers, nil, nil)
+
+	t.Run("restores multiple discarded drafts", func(t *testing.T) {
+		// Setup test with discarded drafts
+		sessionIDs := []string{"sess-draft-1", "sess-draft-2", "sess-draft-3"}
+
+		// Mock each session as discarded and update to draft
+		for _, sessionID := range sessionIDs {
+			sess := &store.Session{
+				ID:             sessionID,
+				Status:         store.SessionStatusDiscarded,
+				Query:          "Discarded draft",
+				LastActivityAt: time.Now().Add(-1 * time.Hour),
+			}
+
+			mockStore.EXPECT().
+				GetSession(gomock.Any(), sessionID).
+				Return(sess, nil)
+
+			mockStore.EXPECT().
+				UpdateSession(gomock.Any(), sessionID, gomock.Any()).
+				DoAndReturn(func(ctx context.Context, id string, update store.SessionUpdate) error {
+					// Verify we're updating to draft status
+					require.NotNil(t, update.Status)
+					assert.Equal(t, string(store.SessionStatusDraft), *update.Status)
+					return nil
+				})
+		}
+
+		// Make the bulk restore request
+		restoreReq := api.BulkRestoreDraftsRequest{
+			SessionIds: sessionIDs,
+		}
+		w := makeRequest(t, router, "POST", "/api/v1/sessions/restore", restoreReq)
+
+		var resp struct {
+			Data struct {
+				Success        bool     `json:"success"`
+				FailedSessions []string `json:"failed_sessions,omitempty"`
+			} `json:"data"`
+		}
+		assertJSONResponse(t, w, 200, &resp)
+
+		assert.True(t, resp.Data.Success)
+		assert.Empty(t, resp.Data.FailedSessions)
+	})
+
+	t.Run("handles partial failure gracefully", func(t *testing.T) {
+		// Setup with mix of discarded and non-discarded sessions
+		sessionIDs := []string{"sess-discarded-1", "sess-active-1", "sess-not-found-1"}
+
+		// First session is discarded and should be restored
+		discardedSess := &store.Session{
+			ID:             "sess-discarded-1",
+			Status:         store.SessionStatusDiscarded,
+			Query:          "Discarded draft",
+			LastActivityAt: time.Now().Add(-1 * time.Hour),
+		}
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), "sess-discarded-1").
+			Return(discardedSess, nil)
+		mockStore.EXPECT().
+			UpdateSession(gomock.Any(), "sess-discarded-1", gomock.Any()).
+			Return(nil)
+
+		// Second session is active (not discarded) - should fail
+		activeSess := &store.Session{
+			ID:             "sess-active-1",
+			Status:         store.SessionStatusRunning,
+			Query:          "Active session",
+			LastActivityAt: time.Now(),
+		}
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), "sess-active-1").
+			Return(activeSess, nil)
+
+		// Third session doesn't exist - should fail
+		mockStore.EXPECT().
+			GetSession(gomock.Any(), "sess-not-found-1").
+			Return(nil, sql.ErrNoRows)
+
+		// Make the bulk restore request
+		restoreReq := api.BulkRestoreDraftsRequest{
+			SessionIds: sessionIDs,
+		}
+		w := makeRequest(t, router, "POST", "/api/v1/sessions/restore", restoreReq)
+
+		var resp struct {
+			Data struct {
+				Success        bool     `json:"success"`
+				FailedSessions []string `json:"failed_sessions,omitempty"`
+			} `json:"data"`
+		}
+		assertJSONResponse(t, w, 207, &resp)
+
+		assert.False(t, resp.Data.Success)
+		assert.Len(t, resp.Data.FailedSessions, 2)
+		assert.Contains(t, resp.Data.FailedSessions, "sess-active-1")
+		assert.Contains(t, resp.Data.FailedSessions, "sess-not-found-1")
+	})
+
+	t.Run("validates empty session_ids", func(t *testing.T) {
+		// Call with empty array
+		restoreReq := api.BulkRestoreDraftsRequest{
+			SessionIds: []string{},
+		}
+		w := makeRequest(t, router, "POST", "/api/v1/sessions/restore", restoreReq)
+
+		var resp struct {
+			Error api.ErrorDetail `json:"error"`
+		}
+		assertJSONResponse(t, w, 400, &resp)
+
+		assert.Equal(t, "HLD-3002", resp.Error.Code)
+		assert.Contains(t, resp.Error.Message, "session_ids is required and must not be empty")
 	})
 }
 

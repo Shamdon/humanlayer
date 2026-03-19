@@ -1,15 +1,20 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '@/AppStore'
 import { ViewMode } from '@/lib/daemon/types'
 import SessionTable from '@/components/internal/SessionTable'
 import { useHotkeys } from 'react-hotkeys-hook'
-import { useSessionLauncher, useKeyboardNavigationProtection } from '@/hooks'
-import { Inbox, Archive } from 'lucide-react'
+import { useKeyboardNavigationProtection } from '@/hooks'
+import { useSessionLauncher } from '@/hooks/useSessionLauncher'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Button } from '@/components/ui/button'
 import { HOTKEY_SCOPES } from '@/hooks/hotkeys/scopes'
+import { DangerouslySkipPermissionsDialog } from '@/components/internal/SessionDetail/DangerouslySkipPermissionsDialog'
+import { HotkeyScopeBoundary } from '@/components/HotkeyScopeBoundary'
+import { toast } from 'sonner'
 
 export function SessionTablePage() {
-  const { isOpen: isSessionLauncherOpen, open: openSessionLauncher } = useSessionLauncher()
+  const isSessionLauncherOpen = useSessionLauncher(state => state.isOpen)
   const navigate = useNavigate()
   const tableRef = useRef<HTMLDivElement>(null)
 
@@ -20,15 +25,107 @@ export function SessionTablePage() {
   const { shouldIgnoreMouseEvent, startKeyboardNavigation } = useKeyboardNavigationProtection()
 
   const sessions = useStore(state => state.sessions)
+  const sessionCounts = useStore(state => state.sessionCounts)
   const selectedSessions = useStore(state => state.selectedSessions)
   const clearSelection = useStore(state => state.clearSelection)
   const focusedSession = useStore(state => state.focusedSession)
   const setFocusedSession = useStore(state => state.setFocusedSession)
-  const viewMode = useStore(state => state.viewMode)
+  const setNextViewMode = useStore(state => state.setNextViewMode)
+  const setPreviousViewMode = useStore(state => state.setPreviousViewMode)
+  const getViewMode = useStore(state => state.getViewMode)
   const setViewMode = useStore(state => state.setViewMode)
 
+  const viewMode = getViewMode()
+  const refreshSessions = useStore(state => state.refreshSessions)
+
+  // Refresh sessions when view mode changes to drafts
+  useEffect(() => {
+    if (viewMode === ViewMode.Drafts) {
+      refreshSessions()
+    }
+  }, [viewMode, refreshSessions])
+
+  // Bypass permissions modal state
+  const [bypassPermissionsOpen, setBypassPermissionsOpen] = useState(false)
+  const [bypassSessionIds, setBypassSessionIds] = useState<string[]>([])
+
+  // Handler for direct disable (no modal)
+  const handleDirectDisable = useCallback(async (sessionIds: string[]) => {
+    try {
+      await useStore.getState().bulkSetBypassPermissions(sessionIds, false, null)
+      // No toast - silent like SessionDetail
+    } catch (error) {
+      console.error('Failed to disable bypass permissions', error)
+      toast.error('Failed to disable bypass permissions')
+    }
+  }, [])
+
+  // Handler for hotkey trigger with intelligent toggle logic
+  const handleBypassPermissions = useCallback(
+    (sessionIds: string[]) => {
+      // Get the actual session objects
+      const selectedSessionObjects = sessionIds
+        .map(id => sessions.find(s => s.id === id))
+        .filter(Boolean) as typeof sessions
+
+      if (selectedSessionObjects.length === 0) return
+
+      // Check bypass status of all selected sessions
+      const bypassStatuses = selectedSessionObjects.map(s => s.dangerouslySkipPermissions)
+      const allBypassing = bypassStatuses.every(status => status === true)
+
+      if (selectedSessionObjects.length === 1) {
+        // Single session behavior - matches SessionDetail
+        const session = selectedSessionObjects[0]
+
+        if (session.dangerouslySkipPermissions) {
+          // Directly disable without modal (like SessionDetail.tsx:729-739)
+          handleDirectDisable([session.id])
+        } else {
+          // Show modal to enable
+          setBypassSessionIds([session.id])
+          setBypassPermissionsOpen(true)
+        }
+      } else {
+        // Multiple sessions behavior
+        if (allBypassing) {
+          // All are bypassing - disable all without modal
+          handleDirectDisable(sessionIds)
+        } else {
+          // Mixed state or none bypassing - show modal to enable/refresh all
+          setBypassSessionIds(sessionIds)
+          setBypassPermissionsOpen(true)
+        }
+      }
+    },
+    [sessions, handleDirectDisable],
+  )
+
+  // Handler for modal confirmation
+  const handleBypassPermissionsConfirm = useCallback(
+    async (timeoutMinutes: number | null) => {
+      try {
+        const expiresAt = timeoutMinutes ? new Date(Date.now() + timeoutMinutes * 60 * 1000) : null
+
+        await useStore.getState().bulkSetBypassPermissions(bypassSessionIds, true, expiresAt)
+
+        toast.success(`Bypass permissions enabled for ${bypassSessionIds.length} session(s)`)
+        setBypassPermissionsOpen(false)
+        setBypassSessionIds([])
+      } catch {
+        toast.error('Failed to enable bypass permissions')
+      }
+    },
+    [bypassSessionIds],
+  )
+
   const handleActivateSession = (session: any) => {
-    navigate(`/sessions/${session.id}`)
+    // Route draft sessions to the dedicated draft route
+    if (session.status === 'draft') {
+      navigate(`/sessions/draft?id=${session.id}`)
+    } else {
+      navigate(`/sessions/${session.id}`)
+    }
   }
 
   // Custom navigation functions that work with sessions
@@ -71,7 +168,7 @@ export function SessionTablePage() {
     'tab',
     e => {
       e.preventDefault()
-      setViewMode(viewMode === ViewMode.Normal ? ViewMode.Archived : ViewMode.Normal)
+      setNextViewMode()
     },
     {
       enableOnFormTags: false,
@@ -79,6 +176,11 @@ export function SessionTablePage() {
       enabled: !isSessionLauncherOpen,
     },
   )
+
+  useHotkeys('shift+tab', e => {
+    e.preventDefault()
+    setPreviousViewMode()
+  })
 
   // Handle Option+A to trigger auto-accept for selected sessions
   useHotkeys(
@@ -231,6 +333,42 @@ export function SessionTablePage() {
 
   return (
     <div className="flex flex-col gap-4">
+      <nav className="sticky top-0 z-10 flex items-center justify-between gap-4">
+        <Tabs
+          className="w-[400px]"
+          value={viewMode}
+          onValueChange={value => setViewMode(value as ViewMode)}
+        >
+          <TabsList>
+            <TabsTrigger value={ViewMode.Normal}>
+              Sessions
+              {sessionCounts?.normal !== undefined && sessionCounts.normal > 0
+                ? ` (${sessionCounts.normal})`
+                : ''}
+            </TabsTrigger>
+            <TabsTrigger value={ViewMode.Drafts}>
+              Drafts
+              {sessionCounts?.draft !== undefined && sessionCounts.draft > 0
+                ? ` (${sessionCounts.draft})`
+                : ''}
+            </TabsTrigger>
+            <TabsTrigger value={ViewMode.Archived}>Archived</TabsTrigger>
+          </TabsList>
+        </Tabs>
+
+        {/* Only show Create button when not in empty state for normal/drafts view */}
+        {(viewMode === ViewMode.Archived || sessions.length > 0) && (
+          <Button
+            onClick={() => {
+              navigate('/sessions/draft')
+            }}
+            size="sm"
+            variant="outline"
+          >
+            Create <kbd className="ml-1 px-1 py-0.5 text-xs bg-muted/50 rounded">c</kbd>
+          </Button>
+        )}
+      </nav>
       <div ref={tableRef} tabIndex={-1} className="focus:outline-none">
         <SessionTable
           sessions={sessions}
@@ -252,33 +390,25 @@ export function SessionTablePage() {
           handleFocusPreviousSession={focusPreviousSession}
           searchText={undefined}
           matchedSessions={undefined}
-          archived={viewMode === ViewMode.Archived}
-          emptyState={
-            viewMode === ViewMode.Archived
-              ? {
-                  icon: Archive,
-                  title: 'No archived sessions',
-                  message:
-                    'Sessions you archive will appear here. Press ESC or click below to go back.',
-                  action: {
-                    label: 'View all sessions',
-                    onClick: () => setViewMode(ViewMode.Normal),
-                  },
-                }
-              : {
-                  icon: Inbox,
-                  title: 'No sessions yet',
-                  message: 'Create a new session by pressing "c" or clicking below.',
-                  action: {
-                    label: 'Create new session',
-                    onClick: () => {
-                      openSessionLauncher()
-                    },
-                  },
-                }
-          }
+          isArchivedView={viewMode === ViewMode.Archived}
+          isDraftsView={viewMode === ViewMode.Drafts}
+          onNavigateToSessions={() => setViewMode(ViewMode.Normal)}
+          onBypassPermissions={handleBypassPermissions}
         />
       </div>
+      <HotkeyScopeBoundary
+        scope={HOTKEY_SCOPES.SESSIONS_BYPASS_PERMISSIONS_MODAL}
+        isActive={bypassPermissionsOpen}
+        rootScopeDisabled={true}
+        componentName="SessionListBypassPermissionsDialog"
+      >
+        <DangerouslySkipPermissionsDialog
+          open={bypassPermissionsOpen}
+          onOpenChange={setBypassPermissionsOpen}
+          onConfirm={handleBypassPermissionsConfirm}
+          sessionCount={bypassSessionIds.length}
+        />
+      </HotkeyScopeBoundary>
     </div>
   )
 }

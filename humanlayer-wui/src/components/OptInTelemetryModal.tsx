@@ -98,6 +98,9 @@ export function OptInTelemetryModal({ open, onOpenChange }: OptInTelemetryModalP
               <ul className="text-sm text-muted-foreground space-y-1 ml-6">
                 <li>• JavaScript errors and crash reports</li>
                 <li>• Performance metrics (load times, memory usage)</li>
+                <li>• App launch events</li>
+                <li>• Session usage metadata</li>
+                <li>• Navigation metadata</li>
               </ul>
             </div>
 
@@ -131,7 +134,7 @@ export function OptInTelemetryModal({ open, onOpenChange }: OptInTelemetryModalP
                 <>
                   Enable Reporting
                   <kbd className="ml-2 px-1 py-0.5 text-xs bg-muted/50 rounded">
-                    {navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'Ctrl'}+⏎
+                    {navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'Ctrl'}+ENTER
                   </kbd>
                 </>
               )}

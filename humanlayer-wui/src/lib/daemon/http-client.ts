@@ -8,9 +8,12 @@ import {
   UpdateUserSettingsRequest,
   ConfigResponse,
   UpdateConfigRequest,
+  FuzzySearchFilesResponse,
+  Agent,
 } from '@humanlayer/hld-sdk'
 import { getDaemonUrl, getDefaultHeaders } from './http-config'
 import { logger } from '@/lib/logging'
+import { captureException } from '@/lib/telemetry/sentry'
 import type {
   DaemonClient as IDaemonClient,
   LaunchSessionParams,
@@ -74,6 +77,22 @@ export class HTTPDaemonClient implements IDaemonClient {
     this.client = new HLDClient({
       baseUrl: `${baseUrl}/api/v1`,
       headers: getDefaultHeaders(),
+      // Add Sentry error handler
+      onFetchError: (error, context) => {
+        logger.error('[HTTPDaemonClient] SDK fetch error:', {
+          url: context.url,
+          method: context.method,
+          error: error.message,
+        })
+
+        // Trace to Sentry with context
+        captureException(error, {
+          component: 'HTTPDaemonClient',
+          url: context.url,
+          method: context.method,
+          errorType: 'FetchError',
+        })
+      },
     })
 
     // Verify connection with timeout
@@ -123,6 +142,30 @@ export class HTTPDaemonClient implements IDaemonClient {
 
   // Session Management Methods
 
+  async getSlashCommands(params: {
+    workingDir: string
+    query?: string
+  }): Promise<{ data: Array<{ name: string; source: 'local' | 'global' }> }> {
+    await this.ensureConnected()
+
+    const response = await this.client!.getSlashCommands(params)
+
+    return response as { data: Array<{ name: string; source: 'local' | 'global' }> }
+  }
+
+  async searchSessions(params: { query?: string; limit?: number } = {}): Promise<{ data: Session[] }> {
+    await this.ensureConnected()
+
+    const response = await this.client!.searchSessions({
+      query: params.query,
+      limit: params.limit || 10,
+    })
+
+    return {
+      data: response.data.map(transformSDKSession),
+    }
+  }
+
   async launchSession(
     params: LaunchSessionParams | LaunchSessionRequest,
   ): Promise<CreateSessionResponseData> {
@@ -138,6 +181,8 @@ export class HTTPDaemonClient implements IDaemonClient {
         model = 'sonnet'
       } else if (params.model.includes('opus')) {
         model = 'opus'
+      } else if (params.model.includes('haiku')) {
+        model = 'haiku'
       }
     }
     // For OpenRouter and Baseten, pass model string as-is via proxyModelOverride
@@ -156,7 +201,7 @@ export class HTTPDaemonClient implements IDaemonClient {
       model:
         provider === 'openrouter' || provider === 'baseten'
           ? undefined
-          : (model as 'opus' | 'sonnet' | undefined),
+          : (model as 'opus' | 'sonnet' | 'haiku' | undefined),
       mcpConfig: 'mcpConfig' in params ? params.mcpConfig : (params as LaunchSessionRequest).mcp_config,
       permissionPromptTool:
         'permissionPromptTool' in params
@@ -175,6 +220,7 @@ export class HTTPDaemonClient implements IDaemonClient {
           ? params.disallowedTools
           : (params as LaunchSessionRequest).disallowed_tools,
       additionalDirectories: additionalDirs,
+      draft: 'draft' in params ? params.draft : undefined,
       // Pass proxy configuration directly if using OpenRouter
       ...(provider === 'openrouter' && {
         proxyEnabled: true,
@@ -206,33 +252,37 @@ export class HTTPDaemonClient implements IDaemonClient {
 
   async listSessions(): Promise<Session[]> {
     await this.ensureConnected()
-    const response = await this.client!.listSessions({ leafOnly: true })
-    return response.map(transformSDKSession)
+    const sessions = await this.client!.listSessions({ leavesOnly: true })
+    return sessions.map(transformSDKSession)
   }
 
-  async getSessionLeaves(request?: {
-    include_archived?: boolean
-    archived_only?: boolean
-  }): Promise<{ sessions: Session[] }> {
+  async getSessionLeaves(request?: { filter?: 'normal' | 'archived' | 'draft' }): Promise<{
+    sessions: Session[]
+    counts?: {
+      normal?: number
+      archived?: number
+      draft?: number
+    }
+  }> {
     await this.ensureConnected()
-    // The SDK's listSessions with leafOnly=true is equivalent
-    const response = await this.client!.listSessions({
-      leafOnly: true,
-      includeArchived: request?.include_archived,
-      archivedOnly: request?.archived_only,
+    // Use the new method that returns the full response with counts
+    const response = await this.client!.listSessionsWithCounts({
+      leavesOnly: true,
+      filter: request?.filter,
     })
     logger.debug(
       'getSessionLeaves raw response sample:',
-      response[0]
+      response.data?.[0]
         ? {
-            id: response[0].id,
-            dangerouslySkipPermissions: response[0].dangerouslySkipPermissions,
-            dangerouslySkipPermissionsExpiresAt: response[0].dangerouslySkipPermissionsExpiresAt,
+            id: response.data[0].id,
+            dangerouslySkipPermissions: response.data[0].dangerouslySkipPermissions,
+            dangerouslySkipPermissionsExpiresAt: response.data[0].dangerouslySkipPermissionsExpiresAt,
           }
         : 'no sessions',
     )
     return {
-      sessions: response.map(transformSDKSession),
+      sessions: response.data.map(transformSDKSession),
+      counts: response.counts,
     }
   }
 
@@ -262,6 +312,51 @@ export class HTTPDaemonClient implements IDaemonClient {
   async interruptSession(sessionId: string): Promise<{ success: boolean }> {
     await this.ensureConnected()
     await this.client!.interruptSession(sessionId)
+    return { success: true }
+  }
+
+  async launchDraftSession(
+    sessionId: string,
+    prompt: string,
+    createDirectoryIfNotExists?: boolean,
+  ): Promise<{ success: boolean }> {
+    await this.ensureConnected()
+    try {
+      await this.client!.launchDraftSession(sessionId, prompt, createDirectoryIfNotExists)
+      return { success: true }
+    } catch (error: any) {
+      // The SDK throws a ResponseError with the response object
+      // We need to check error.response.status and read the body
+      const response = error.response
+
+      if (response && response.status === 422) {
+        // Read the JSON body from the response
+        let errorBody
+        try {
+          errorBody = await response.json()
+        } catch (jsonError) {
+          logger.error('[launchDraftSession] Failed to parse 422 response body:', jsonError)
+          throw error // Re-throw original error if JSON parsing fails
+        }
+
+        if (errorBody?.error === 'directory_not_found') {
+          // Re-throw with proper structure for UI to handle
+          throw {
+            status: 422,
+            data: errorBody,
+            message: errorBody.message,
+          }
+        }
+      }
+
+      // Re-throw other errors
+      throw error
+    }
+  }
+
+  async deleteDraftSession(sessionId: string): Promise<{ success: boolean }> {
+    await this.ensureConnected()
+    await this.client!.deleteDraftSession(sessionId)
     return { success: true }
   }
 
@@ -341,16 +436,28 @@ export class HTTPDaemonClient implements IDaemonClient {
     }
   }
 
+  async bulkRestoreDrafts(params: { session_ids: string[] }): Promise<{
+    success: boolean
+    failed_sessions?: string[]
+  }> {
+    await this.ensureConnected()
+    const response = await this.client!.bulkRestoreDrafts(params)
+    return response
+  }
+
   async updateSession(
     sessionId: string,
     updates: {
       model?: string
       title?: string
+      status?: string
       archived?: boolean
       autoAcceptEdits?: boolean
       dangerouslySkipPermissions?: boolean
       dangerouslySkipPermissionsTimeoutMs?: number
       additionalDirectories?: string[]
+      workingDir?: string
+      editorState?: string
       // New proxy fields
       proxyEnabled?: boolean
       proxyBaseUrl?: string
@@ -368,6 +475,9 @@ export class HTTPDaemonClient implements IDaemonClient {
     if (updates.title !== undefined) {
       sdkUpdates.title = updates.title
     }
+    if (updates.status !== undefined) {
+      sdkUpdates.status = updates.status
+    }
     if (updates.archived !== undefined) {
       sdkUpdates.archived = updates.archived
     }
@@ -382,6 +492,12 @@ export class HTTPDaemonClient implements IDaemonClient {
     }
     if (updates.additionalDirectories !== undefined) {
       sdkUpdates.additionalDirectories = updates.additionalDirectories
+    }
+    if (updates.workingDir !== undefined) {
+      sdkUpdates.working_dir = updates.workingDir
+    }
+    if (updates.editorState !== undefined) {
+      sdkUpdates.editorState = updates.editorState
     }
     if (updates.proxyEnabled !== undefined) {
       sdkUpdates.proxyEnabled = updates.proxyEnabled
@@ -544,6 +660,41 @@ export class HTTPDaemonClient implements IDaemonClient {
     // SDK client doesn't support limit parameter yet
     const response = await this.client!.getRecentPaths()
     return response // SDK now properly returns RecentPath[]
+  }
+
+  async fuzzySearchFiles(params: {
+    query: string
+    paths: string[]
+    limit?: number
+    filesOnly?: boolean
+    respectGitignore?: boolean
+  }): Promise<FuzzySearchFilesResponse> {
+    await this.ensureConnected()
+    const response = await this.client!.fuzzySearchFiles(params)
+    return response
+  }
+
+  async validateDirectory(path: string) {
+    await this.ensureConnected()
+    const response = await this.client!.validateDirectory(path)
+    return response
+  }
+
+  async createDirectory(path: string) {
+    await this.ensureConnected()
+    const response = await this.client!.createDirectory(path)
+    return response
+  }
+
+  async discoverAgents(workingDir: string): Promise<Agent[]> {
+    await this.ensureConnected()
+
+    // Use the generated SDK client method
+    const response = await this.client!.discoverAgents({
+      discoverAgentsRequest: { workingDir },
+    })
+
+    return response.agents || []
   }
 
   async getDebugInfo(): Promise<import('./types').DebugInfo> {

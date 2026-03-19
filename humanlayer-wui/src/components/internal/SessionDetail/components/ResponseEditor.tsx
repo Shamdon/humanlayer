@@ -1,27 +1,42 @@
-import React, { useEffect, forwardRef, useImperativeHandle, useState, useRef } from 'react'
-import { useEditor, EditorContent, Extension, Content } from '@tiptap/react'
-import StarterKit from '@tiptap/starter-kit'
-import { Placeholder } from '@tiptap/extensions'
-import { Decoration, DecorationSet } from '@tiptap/pm/view'
-import { Plugin } from '@tiptap/pm/state'
+import { useStore } from '@/AppStore'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { createLowlight } from 'lowlight'
+import { logger } from '@/lib/logging'
+import { openPath } from '@tauri-apps/plugin-opener'
+import Mention from '@tiptap/extension-mention'
+import { Placeholder } from '@tiptap/extensions'
+import { Plugin } from '@tiptap/pm/state'
+import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import {
+  Content,
+  EditorContent,
+  Extension,
+  ReactNodeViewRenderer,
+  ReactRenderer,
+  useEditor,
+} from '@tiptap/react'
+import StarterKit from '@tiptap/starter-kit'
+import bash from 'highlight.js/lib/languages/bash'
 import clojure from 'highlight.js/lib/languages/clojure'
-import javascript from 'highlight.js/lib/languages/javascript'
-import typescript from 'highlight.js/lib/languages/typescript'
-import python from 'highlight.js/lib/languages/python'
-import rust from 'highlight.js/lib/languages/rust'
+import cpp from 'highlight.js/lib/languages/cpp'
 import go from 'highlight.js/lib/languages/go'
 import java from 'highlight.js/lib/languages/java'
-import cpp from 'highlight.js/lib/languages/cpp'
-import bash from 'highlight.js/lib/languages/bash'
+import javascript from 'highlight.js/lib/languages/javascript'
 import json from 'highlight.js/lib/languages/json'
 import markdown from 'highlight.js/lib/languages/markdown'
+import python from 'highlight.js/lib/languages/python'
+import rust from 'highlight.js/lib/languages/rust'
+import typescript from 'highlight.js/lib/languages/typescript'
 import xml from 'highlight.js/lib/languages/xml'
 import yaml from 'highlight.js/lib/languages/yaml'
-import { logger } from '@/lib/logging'
-import { useStore } from '@/AppStore'
-import { openPath } from '@tauri-apps/plugin-opener'
+import { createLowlight } from 'lowlight'
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { FileMentionNode } from './FileMentionNode'
+import { FuzzyFileMentionList } from './FuzzyFileMentionList'
+import { SlashCommandList } from './SlashCommandList'
+
+// Export regex patterns for markdown italic syntax
+export const italicRegex = /(?<=^|\s|[^\w])\*(?!\*)([^*]+)\*(?!\*)(?=\s|[^\w]|$)/g
+export const underscoreItalicRegex = /(?<=^|\s|[^\w])_(?!_)([^_]+)_(?!_)(?=\s|[^\w]|$)/g
 
 // Create lowlight instance with common languages
 const lowlight = createLowlight()
@@ -59,6 +74,13 @@ const MarkdownSyntaxHighlight = Extension.create({
         props: {
           decorations: (state: any) => {
             const doc = state.doc
+            const textContent = doc.textContent
+
+            // Performance optimization: disable highlighting for large texts
+            if (textContent.length > 10000) {
+              return DecorationSet.empty
+            }
+
             const decorations: Decoration[] = []
 
             // Track code blocks and collect lines
@@ -233,8 +255,8 @@ const MarkdownSyntaxHighlight = Extension.create({
                   decorations.push(Decoration.inline(start + 2, end - 2, { class: 'markdown-bold' }))
                 }
 
-                // Match *italic* syntax (careful not to match bold)
-                const italicRegex = /(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g
+                // Match *italic* syntax - require word boundary or whitespace before/after
+                // This prevents matching within identifiers that might use asterisks
                 while ((match = italicRegex.exec(text)) !== null) {
                   const start = pos + match.index
                   const end = start + match[0].length
@@ -255,8 +277,8 @@ const MarkdownSyntaxHighlight = Extension.create({
                   decorations.push(Decoration.inline(start + 1, end - 1, { class: 'markdown-italic' }))
                 }
 
-                // Match _italic_ syntax (careful not to match bold)
-                const underscoreItalicRegex = /(?<!_)_(?!_)([^_]+)(?<!_)_(?!_)/g
+                // Match _italic_ syntax - require word boundary or whitespace before/after
+                // This prevents matching within identifiers like dept_id
                 while ((match = underscoreItalicRegex.exec(text)) !== null) {
                   const start = pos + match.index
                   const end = start + match[0].length
@@ -396,9 +418,6 @@ const KeyboardShortcuts = Extension.create({
   addOptions() {
     return {
       onSubmit: undefined,
-      onToggleAutoAccept: undefined,
-      onToggleDangerouslySkipPermissions: undefined,
-      onToggleForkView: undefined,
     }
   },
 
@@ -411,18 +430,18 @@ const KeyboardShortcuts = Extension.create({
         }
         return true
       },
-      'Shift-Tab': () => {
-        this.options.onToggleAutoAccept?.()
-        return true // Prevent default tab behavior
-      },
-      'Alt-y': () => {
-        this.options.onToggleDangerouslySkipPermissions?.()
-        return true
-      },
-      'Mod-y': () => {
-        this.options.onToggleForkView?.()
-        return true
-      },
+      // NOTE: Business logic hotkeys (Alt-a, Alt-y, Mod-y) have been removed
+      // They are now handled by SessionDetail with enableOnContentEditable: true
+      // This prevents duplication and ensures single source of truth
+
+      // TEST NOTE: We may need to add these back as simple return true statements
+      // if special characters (å, ¥) still get typed when the editor is focused.
+      // For now, relying on preventDefault: true in SessionDetail's useHotkeys
+
+      // Uncomment these lines if testing shows special characters are still typed:
+      // 'Alt-a': () => true, // Just prevent default, no business logic
+      // 'Alt-y': () => true, // Just prevent default, no business logic
+      // 'Mod-y': () => true, // Just prevent default, no business logic
     }
   },
 })
@@ -432,17 +451,33 @@ interface ResponseEditorProps {
   onChange: (value: Content) => void
   onKeyDown?: (e: React.KeyboardEvent) => void
   disabled?: boolean
-  placeholder?: string
+  placeholder: string
   className?: string
   onFocus?: () => void
   onBlur?: () => void
   onSubmit?: () => void
-  onToggleAutoAccept?: () => void
-  onToggleDangerouslySkipPermissions?: () => void
-  onToggleForkView?: () => void
+  workingDir?: string
+  workingDirRef?: React.MutableRefObject<string>
+  // NOTE: Business logic callbacks removed - now handled by SessionDetail
 }
 
-export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorProps>(
+/**
+ * ResponseEditor - A TipTap-based markdown editor with syntax highlighting
+ *
+ * Features:
+ * - Markdown syntax highlighting via decorations
+ * - Slash commands for quick actions
+ * - File mentions with @ syntax
+ * - Custom keyboard shortcuts
+ *
+ * Known Limitations:
+ * - Safari may still show autocorrect/autocomplete on contenteditable elements
+ *   despite setting the appropriate attributes. This is a Safari platform bug.
+ *   Users can disable autocorrect in Safari settings or use Chrome/Firefox.
+ *
+ * @component
+ */
+export const ResponseEditor = forwardRef<{ focus: () => void; blur?: () => void }, ResponseEditorProps>(
   (
     {
       initialValue,
@@ -454,18 +489,28 @@ export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorPr
       onFocus,
       onBlur,
       onSubmit,
-      onToggleAutoAccept,
-      onToggleDangerouslySkipPermissions,
-      onToggleForkView,
+      workingDir,
+      workingDirRef,
     },
     ref,
   ) => {
     const onSubmitRef = React.useRef<ResponseEditorProps['onSubmit']>()
     const onChangeRef = React.useRef<ResponseEditorProps['onChange']>()
-    const onToggleAutoAcceptRef = React.useRef<ResponseEditorProps['onToggleAutoAccept']>()
-    const onToggleDangerouslySkipPermissionsRef =
-      React.useRef<ResponseEditorProps['onToggleDangerouslySkipPermissions']>()
-    const onToggleForkViewRef = React.useRef<ResponseEditorProps['onToggleForkView']>()
+    const placeholderRef = useRef<string>(placeholder)
+    const staticPlaceholderRef = useRef(() => placeholderRef.current)
+
+    // Always create a local ref for backwards compatibility
+    const localWorkingDirRef = React.useRef(workingDir || '')
+
+    // Use the passed workingDirRef if provided, otherwise use the local one
+    const effectiveWorkingDirRef = workingDirRef || localWorkingDirRef
+
+    // If we're using a local ref, keep it updated with the workingDir prop
+    React.useEffect(() => {
+      if (!workingDirRef && workingDir !== undefined) {
+        localWorkingDirRef.current = workingDir
+      }
+    }, [workingDir, workingDirRef])
 
     // Tooltip state for file mentions
     const [tooltipState, setTooltipState] = useState<{
@@ -479,6 +524,7 @@ export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorPr
     const virtualAnchor = useRef<HTMLDivElement>(null)
 
     const setResponseEditor = useStore(state => state.setResponseEditor)
+    const setResponseEditorEmpty = useStore(state => state.setResponseEditorEmpty)
     const removeResponseEditor = useStore(state => state.removeResponseEditor)
 
     useEffect(() => {
@@ -487,15 +533,6 @@ export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorPr
     useEffect(() => {
       onChangeRef.current = onChange
     }, [onChange])
-    useEffect(() => {
-      onToggleAutoAcceptRef.current = onToggleAutoAccept
-    }, [onToggleAutoAccept])
-    useEffect(() => {
-      onToggleDangerouslySkipPermissionsRef.current = onToggleDangerouslySkipPermissions
-    }, [onToggleDangerouslySkipPermissions])
-    useEffect(() => {
-      onToggleForkViewRef.current = onToggleForkView
-    }, [onToggleForkView])
 
     const editor = useEditor({
       autofocus: false,
@@ -513,43 +550,187 @@ export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorPr
         MarkdownSyntaxHighlight,
         KeyboardShortcuts.configure({
           onSubmit: () => onSubmitRef.current?.(),
-          onToggleAutoAccept: () => onToggleAutoAcceptRef.current?.(),
-          onToggleDangerouslySkipPermissions: () => onToggleDangerouslySkipPermissionsRef.current?.(),
-          onToggleForkView: () => onToggleForkViewRef.current?.(),
         }),
         Placeholder.configure({
-          placeholder: placeholder || 'Type something...',
+          placeholder: staticPlaceholderRef.current,
         }),
-        // TEMPORARILY DISABLED: Mention functionality for fuzzy file finding
-        // Uncomment the block below to re-enable @-mention file search
-        /*
-        Mention.configure({
+        // Slash command Mention extension
+        Mention.extend({
+          name: 'slash-command',
+        }).configure({
           HTMLAttributes: {
-            class: 'mention',
-            'data-mention': 'true',
+            class: 'mention slash-command',
+          },
+          renderText({ node }) {
+            // The label already contains the slash (e.g., "/research_codebase")
+            // Return it as-is to avoid double slashes in getText() output
+            return node.attrs.label || node.attrs.id || ''
           },
           renderHTML({ node }) {
             return [
               'span',
               {
-                class: 'mention',
-                'data-mention': node.attrs.id,
-                title: `Open ${node.attrs.id}`,
+                class: 'mention slash-command',
+                'data-slash-command': node.attrs.id,
               },
-              `@${node.attrs.label || node.attrs.id}`,
+              node.attrs.label || node.attrs.id,
             ]
           },
           suggestion: {
+            char: '/',
+            startOfLine: true, // Only trigger at start of line
+            allowSpaces: false,
+            // Only allow slash commands if there isn't already one in the document
+            // The startOfLine: true setting already ensures it only triggers at line starts
+            allow: ({ state }) => {
+              // Check if there are any existing slash-command mentions in the document
+              let hasExistingSlashCommand = false
+              state.doc.descendants(node => {
+                if (node.type.name === 'slash-command') {
+                  hasExistingSlashCommand = true
+                  return false // Stop searching
+                }
+              })
+
+              return !hasExistingSlashCommand
+            },
+            items: () => {
+              return ['placeholder'] // Dummy items, actual search in component
+            },
+
+            render: () => {
+              let component: ReactRenderer<any> | null = null
+              let popup: HTMLDivElement | null = null
+
+              return {
+                onStart: (props: any) => {
+                  // Create popup div
+                  popup = document.createElement('div')
+                  popup.className =
+                    'z-50 min-w-[20rem] max-w-[30rem] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md'
+                  document.body.appendChild(popup)
+
+                  // Create React component with workingDir passed through
+                  component = new ReactRenderer(SlashCommandList, {
+                    props: {
+                      ...props,
+                      workingDir: effectiveWorkingDirRef.current,
+                    },
+                    editor: props.editor,
+                  })
+
+                  popup.appendChild(component.element)
+
+                  // Position dropdown
+                  const { clientRect } = props
+                  if (!clientRect) return
+
+                  const rect = clientRect()
+
+                  // Check space below
+                  const spaceBelow = window.innerHeight - rect.bottom
+                  const spaceAbove = rect.top
+
+                  if (spaceBelow < 300 && spaceAbove > 300) {
+                    // Position above
+                    popup.style.position = 'fixed'
+                    popup.style.left = `${rect.left}px`
+                    popup.style.bottom = `${window.innerHeight - rect.top + 4}px`
+                    popup.style.maxHeight = `${Math.min(spaceAbove - 20, 360)}px`
+                  } else {
+                    // Position below
+                    popup.style.position = 'fixed'
+                    popup.style.left = `${rect.left}px`
+                    popup.style.top = `${rect.bottom + 4}px`
+                    popup.style.maxHeight = `${Math.min(spaceBelow - 20, 360)}px`
+                  }
+                },
+
+                onUpdate(props: any) {
+                  component?.updateProps({
+                    ...props,
+                    workingDir: effectiveWorkingDirRef.current,
+                  })
+
+                  // Reposition if needed
+                  if (!popup || !props.clientRect) return
+
+                  const rect = props.clientRect()
+
+                  const spaceBelow = window.innerHeight - rect.bottom
+                  const spaceAbove = rect.top
+
+                  if (spaceBelow < 300 && spaceAbove > 300) {
+                    popup.style.left = `${rect.left}px`
+                    popup.style.bottom = `${window.innerHeight - rect.top + 4}px`
+                  } else {
+                    popup.style.left = `${rect.left}px`
+                    popup.style.top = `${rect.bottom + 4}px`
+                  }
+                },
+
+                onKeyDown(props: any) {
+                  return component?.ref?.onKeyDown(props) ?? false
+                },
+
+                onExit() {
+                  popup?.remove()
+                  component?.destroy()
+                },
+              }
+            },
+          },
+        }),
+
+        Mention.extend({
+          addAttributes() {
+            return {
+              id: {
+                default: null,
+                parseHTML: (element: HTMLElement) => element.getAttribute('data-id'),
+                renderHTML: (attributes: any) => {
+                  if (!attributes.id) return {}
+                  return { 'data-id': attributes.id }
+                },
+              },
+              label: {
+                default: null,
+                parseHTML: (element: HTMLElement) => element.getAttribute('data-label'),
+                renderHTML: (attributes: any) => {
+                  if (!attributes.label) return {}
+                  return { 'data-label': attributes.label }
+                },
+              },
+              isDirectory: {
+                default: false,
+                parseHTML: (element: HTMLElement) =>
+                  element.getAttribute('data-is-directory') === 'true',
+                renderHTML: (attributes: any) => {
+                  if (!attributes.isDirectory) return {}
+                  return { 'data-is-directory': 'true' }
+                },
+              },
+            }
+          },
+          addNodeView() {
+            return ReactNodeViewRenderer(FileMentionNode as any)
+          },
+        }).configure({
+          HTMLAttributes: {
+            class: 'mention',
+            'data-mention': 'true',
+          },
+          suggestion: {
             char: '@',
-            allowSpaces: true,
+            allowSpaces: false,
             startOfLine: false,
             items: () => {
               // Just return the query as a simple array
-              // The actual file searching happens in FileMentionList
+              // The actual file searching happens in FuzzyFileMentionList
               return ['placeholder']
             },
             render: () => {
-              let component: ReactRenderer<FileMentionListRef> | null = null
+              let component: ReactRenderer<any> | null = null
               let popup: HTMLDivElement | null = null
 
               return {
@@ -557,11 +738,14 @@ export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorPr
                   // Create a portal div for the dropdown with shadcn styling
                   popup = document.createElement('div')
                   popup.className =
-                    'z-50 min-w-[20rem] max-w-[30rem] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md'
+                    'z-50 min-w-[20rem] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md'
                   document.body.appendChild(popup)
 
-                  component = new ReactRenderer(FileMentionList, {
-                    props,
+                  component = new ReactRenderer(FuzzyFileMentionList, {
+                    props: {
+                      ...props,
+                      workingDir: effectiveWorkingDirRef.current,
+                    },
                     editor: props.editor,
                   })
 
@@ -611,7 +795,10 @@ export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorPr
                 },
                 onUpdate: (props: any) => {
                   if (component) {
-                    component.updateProps(props)
+                    component.updateProps({
+                      ...props,
+                      workingDir: effectiveWorkingDirRef.current,
+                    })
 
                     // Update position with intelligent placement
                     const { clientRect } = props
@@ -649,10 +836,6 @@ export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorPr
                   }
                 },
                 onKeyDown: (props: any) => {
-                  if (props.event.key === 'Escape') {
-                    return true
-                  }
-
                   if (component?.ref) {
                     return component.ref.onKeyDown(props)
                   }
@@ -673,14 +856,22 @@ export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorPr
             },
           },
         }),
-        */
       ],
       content: initialValue,
+      onCreate: () => {
+        // Editor created
+      },
+      // Note: Safari has a known limitation where autocorrect/autocomplete attributes
+      // on contenteditable elements (which TipTap uses) are not fully respected.
+      // Safari users experiencing autocorrect issues can disable it system-wide in
+      // macOS System Settings > Keyboard, or in Safari via Edit > Spelling and Grammar.
+      // This is a longstanding Safari bug that affects all contenteditable-based editors.
       editorProps: {
         attributes: {
           class: `tiptap-editor ${className || ''}`,
           spellcheck: 'false',
           autocorrect: 'off',
+          autocomplete: 'off',
           autocapitalize: 'off',
         },
         handleKeyDown: (view, event) => {
@@ -706,12 +897,21 @@ export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorPr
           return false
         },
       },
-      onUpdate: ({ editor }) => onChangeRef.current?.(editor.getJSON()),
+      onUpdate: ({ editor }) => {
+        const jsonContent = editor.getJSON()
+        onChangeRef.current?.(jsonContent)
+        setResponseEditorEmpty(editor.isEmpty)
+      },
       editable: !disabled,
 
       enableInputRules: false,
       enablePasteRules: false,
     })
+
+    useEffect(() => {
+      placeholderRef.current = placeholder
+      editor?.commands.selectAll()
+    }, [editor, placeholder])
 
     // Handle editable state
     useEffect(() => {
@@ -733,12 +933,13 @@ export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorPr
     useEffect(() => {
       logger.log('ResponseEditor.useEffect() - setting response editor')
       setResponseEditor(editor)
+      setResponseEditorEmpty(editor.isEmpty)
       return () => {
         logger.log('TiptapEditor.useEffect() - destroying editor')
         editor?.destroy()
         removeResponseEditor()
       }
-    }, [editor, setResponseEditor, removeResponseEditor])
+    }, [editor, setResponseEditor, setResponseEditorEmpty, removeResponseEditor])
 
     // Handle clicks and hovers on mentions
     useEffect(() => {
@@ -869,7 +1070,15 @@ export const ResponseEditor = forwardRef<{ focus: () => void }, ResponseEditorPr
     return (
       <>
         <div className="tiptap-wrapper">
-          <EditorContent editor={editor} onFocus={onFocus} onBlur={onBlur} />
+          <EditorContent
+            editor={editor}
+            onFocus={onFocus}
+            onBlur={onBlur}
+            spellCheck={false}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+          />
         </div>
 
         {/* Controlled tooltip for file mentions */}

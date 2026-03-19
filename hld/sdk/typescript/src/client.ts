@@ -4,8 +4,11 @@ import {
     ApprovalsApi,
     SystemApi,
     SettingsApi,
+    FilesApi,
+    AgentsApi,
     CreateSessionRequest,
     Session,
+    SessionsResponse,
     Approval,
     CreateSessionResponse,
     CreateSessionResponseData,
@@ -15,13 +18,19 @@ import {
     UserSettingsResponse,
     UpdateUserSettingsRequest,
     ConfigResponse,
-    UpdateConfigRequest
+    UpdateConfigRequest,
+    FuzzySearchFilesRequest,
+    FuzzySearchFilesResponse,
+    DiscoverAgents200Response
 } from './generated';
+import { createErrorInterceptor } from './middleware';
 
 export interface HLDClientOptions {
     baseUrl?: string;
     port?: number;
     headers?: Record<string, string>;
+    // New option for error handling
+    onFetchError?: (error: Error, context: { url: string; method?: string }) => void;
 }
 
 export interface SSEEventHandlers {
@@ -41,6 +50,8 @@ export class HLDClient {
     private sessionsApi: SessionsApi;
     private approvalsApi: ApprovalsApi;
     private settingsApi: SettingsApi;
+    private filesApi: FilesApi;
+    private agentsApi: AgentsApi;
     private baseUrl: string;
     private headers?: Record<string, string>;
     private sseConnections: Map<string, EventSourceLike> = new Map();
@@ -51,12 +62,29 @@ export class HLDClient {
 
         const config = new Configuration({
             basePath: this.baseUrl,
-            headers: this.headers
+            headers: this.headers,
+            // Add error interceptor middleware
+            middleware: [
+                createErrorInterceptor({
+                    onError: (error, context) => {
+                        // Call custom handler if provided
+                        if (options.onFetchError) {
+                            options.onFetchError(error, {
+                                url: context.url,
+                                method: context.init?.method,
+                            });
+                        }
+                    },
+                    logErrors: true,
+                })
+            ]
         });
 
         this.sessionsApi = new SessionsApi(config);
         this.approvalsApi = new ApprovalsApi(config);
         this.settingsApi = new SettingsApi(config);
+        this.filesApi = new FilesApi(config);
+        this.agentsApi = new AgentsApi(config);
     }
 
     // Session Management
@@ -68,6 +96,10 @@ export class HLDClient {
     async listSessions(params?: ListSessionsRequest): Promise<Session[]> {
         const response = await this.sessionsApi.listSessions(params);
         return response.data;
+    }
+
+    async listSessionsWithCounts(params?: ListSessionsRequest): Promise<SessionsResponse> {
+        return await this.sessionsApi.listSessions(params);
     }
 
     async getSession(id: string): Promise<Session> {
@@ -102,6 +134,22 @@ export class HLDClient {
         await this.sessionsApi.interruptSession({ id });
     }
 
+    // Launch draft session
+    async launchDraftSession(id: string, prompt: string, createDirectoryIfNotExists?: boolean): Promise<void> {
+        await this.sessionsApi.launchDraftSession({
+            id,
+            launchDraftSessionRequest: {
+                prompt,
+                createDirectoryIfNotExists
+            }
+        });
+    }
+
+    // Delete draft session
+    async deleteDraftSession(id: string): Promise<void> {
+        await this.sessionsApi.deleteDraftSession({ id });
+    }
+
     // Session archival
     async archiveSessions(sessionIds: string[], archived: boolean = true): Promise<{ archived: string[] }> {
         const response = await this.sessionsApi.bulkArchiveSessions({
@@ -110,6 +158,17 @@ export class HLDClient {
         // The response contains 'success' and optional 'failedSessions'
         // For the test plan, we'll return a simplified response
         return { archived: sessionIds.filter(id => !response.data.failedSessions?.includes(id)) };
+    }
+
+    // Bulk restore drafts
+    async bulkRestoreDrafts(params: { session_ids: string[] }): Promise<{ success: boolean; failed_sessions?: string[] }> {
+        const response = await this.sessionsApi.bulkRestoreDrafts({
+            bulkRestoreDraftsRequest: { sessionIds: params.session_ids }
+        });
+        return {
+            success: response.data.success,
+            failed_sessions: response.data.failedSessions
+        };
     }
 
     // Update session settings
@@ -125,7 +184,9 @@ export class HLDClient {
         proxyModelOverride?: string,
         proxyApiKey?: string,
         archived?: boolean,
-        additionalDirectories?: string[]
+        additionalDirectories?: string[],
+        working_dir?: string,
+        editorState?: string
     }): Promise<void> {
         // Build request with only defined fields to avoid sending undefined values
         const updateSessionRequest: any = {};
@@ -165,6 +226,12 @@ export class HLDClient {
         if (updates.additionalDirectories !== undefined) {
             updateSessionRequest.additionalDirectories = updates.additionalDirectories;
         }
+        if (updates.working_dir !== undefined) {
+            updateSessionRequest.workingDir = updates.working_dir;
+        }
+        if (updates.editorState !== undefined) {
+            updateSessionRequest.editorState = updates.editorState;
+        }
 
         await this.sessionsApi.updateSession({
             id,
@@ -182,6 +249,18 @@ export class HLDClient {
     async getSessionSnapshots(id: string): Promise<any[]> {
         const response = await this.sessionsApi.getSessionSnapshots({ id });
         return response.data;
+    }
+
+    // Get slash commands
+    async getSlashCommands(params: { workingDir: string; query?: string }): Promise<{ data: Array<{ name: string }> }> {
+        const response = await this.sessionsApi.getSlashCommands(params);
+        return response;
+    }
+
+    // Search sessions
+    async searchSessions(params: { query?: string; limit?: number }): Promise<{ data: Session[] }> {
+        const response = await this.sessionsApi.searchSessions(params);
+        return response;
     }
 
     // Get recent paths
@@ -223,6 +302,44 @@ export class HLDClient {
 
     async updateConfig(request: UpdateConfigRequest): Promise<ConfigResponse> {
         return await this.settingsApi.updateConfig({ updateConfigRequest: request });
+    }
+
+    // Files
+    async fuzzySearchFiles(params: {
+        query: string;
+        paths: string[];
+        limit?: number;
+        filesOnly?: boolean;
+        respectGitignore?: boolean;
+    }): Promise<FuzzySearchFilesResponse> {
+        const response = await this.filesApi.fuzzySearchFiles({
+            fuzzySearchFilesRequest: params
+        });
+        return response;
+    }
+
+    // Validate directory existence
+    async validateDirectory(path: string) {
+        const response = await this.filesApi.validateDirectory({
+            validateDirectoryRequest: { path }
+        });
+        return response;
+    }
+
+    // Create directory
+    async createDirectory(path: string) {
+        const response = await this.filesApi.createDirectory({
+            createDirectoryRequest: { path }
+        });
+        return response;
+    }
+
+    // Agents
+    async discoverAgents(params: {
+        discoverAgentsRequest: { workingDir: string }
+    }): Promise<DiscoverAgents200Response> {
+        const response = await this.agentsApi.discoverAgents(params);
+        return response;
     }
 
     // Server-Sent Events using eventsource polyfill

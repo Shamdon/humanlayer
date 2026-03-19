@@ -39,7 +39,7 @@ export function ApprovalWrapper({
 
       {/* Show approval/deny buttons for pending approvals */}
       {showApprovalUI && (
-        <div className="mt-4 flex gap-2 justify-end">
+        <div className="mt-4 flex gap-2 justify-start">
           {!isDenying ? (
             <>
               <Button
@@ -64,6 +64,11 @@ export function ApprovalWrapper({
                   className="cursor-pointer"
                   size="sm"
                   variant="destructive"
+                  onMouseDown={e => {
+                    // Prevent the button from stealing focus
+                    // This is the recommended pattern for toolbar buttons in contenteditable editors
+                    e.preventDefault()
+                  }}
                   onClick={e => {
                     e.stopPropagation()
                     onStartDeny?.()

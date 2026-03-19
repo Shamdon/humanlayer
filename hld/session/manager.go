@@ -178,7 +178,8 @@ func (m *Manager) getClaudeClient() (*claudecode.Client, error) {
 }
 
 // LaunchSession starts a new Claude Code session
-func (m *Manager) LaunchSession(ctx context.Context, config LaunchSessionConfig) (*Session, error) {
+// TODO(0): Consider whether we need to support non-draft session creation directly in daemon post-implementation
+func (m *Manager) LaunchSession(ctx context.Context, config LaunchSessionConfig, isDraft bool) (*Session, error) {
 	// Get Claude client (will attempt initialization if needed)
 	client, err := m.getClaudeClient()
 	if err != nil {
@@ -253,6 +254,14 @@ func (m *Manager) LaunchSession(ctx context.Context, config LaunchSessionConfig)
 		slog.Debug("no MCP config provided")
 	}
 
+	// Set permission prompt tool to use the injected MCP server
+	if claudeConfig.PermissionPromptTool == "" {
+		claudeConfig.PermissionPromptTool = "mcp__codelayer__request_permission"
+		slog.Debug("auto-injected permission_prompt_tool",
+			"session_id", sessionID,
+			"permission_prompt_tool", claudeConfig.PermissionPromptTool)
+	}
+
 	// Capture current working directory if not specified
 	if claudeConfig.WorkingDir == "" {
 		cwd, err := os.Getwd()
@@ -264,12 +273,70 @@ func (m *Manager) LaunchSession(ctx context.Context, config LaunchSessionConfig)
 		}
 	}
 
+	// Handle working directory validation and creation
+	// Skip validation for drafts - allow any path to be set, validate later when launching
+	if claudeConfig.WorkingDir != "" && !isDraft {
+		// Expand ~ if present
+		if strings.HasPrefix(claudeConfig.WorkingDir, "~") {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, fmt.Errorf("failed to get home directory: %w", err)
+			}
+			claudeConfig.WorkingDir = filepath.Join(home, strings.TrimPrefix(claudeConfig.WorkingDir, "~"))
+		}
+
+		// Check directory status
+		info, err := os.Stat(claudeConfig.WorkingDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Directory doesn't exist
+				if config.CreateDirectoryIfNotExists {
+					slog.Info("Creating working directory",
+						"path", claudeConfig.WorkingDir,
+						"session_id", sessionID)
+
+					// Create with parent directories
+					if err := os.MkdirAll(claudeConfig.WorkingDir, 0755); err != nil {
+						return nil, fmt.Errorf("failed to create working directory %s: %w",
+							claudeConfig.WorkingDir, err)
+					}
+
+					slog.Info("Successfully created working directory",
+						"path", claudeConfig.WorkingDir)
+				} else {
+					// Return specific error that client can handle
+					return nil, &DirectoryNotFoundError{
+						Path:    claudeConfig.WorkingDir,
+						Message: fmt.Sprintf("working directory does not exist: %s", claudeConfig.WorkingDir),
+					}
+				}
+			} else {
+				// Other error (permissions, etc.)
+				return nil, fmt.Errorf("error accessing working directory %s: %w",
+					claudeConfig.WorkingDir, err)
+			}
+		} else {
+			// Path exists - verify it's a directory
+			if !info.IsDir() {
+				return nil, fmt.Errorf("working directory path exists but is not a directory: %s",
+					claudeConfig.WorkingDir)
+			}
+		}
+	}
+
 	// Create session record directly in database
 	startTime := time.Now()
 
 	// Store session in database
 	dbSession := store.NewSessionFromConfig(sessionID, runID, claudeConfig)
 	dbSession.Summary = CalculateSummary(claudeConfig.Query)
+
+	// Set initial status based on isDraft
+	if isDraft {
+		dbSession.Status = store.SessionStatusDraft
+	} else {
+		dbSession.Status = store.SessionStatusStarting
+	}
 
 	// Set title from launch config if provided
 	if config.Title != "" {
@@ -354,6 +421,25 @@ func (m *Manager) LaunchSession(ctx context.Context, config LaunchSessionConfig)
 			}
 		}
 	}
+	// Skip Claude launch if this is a draft session
+	if isDraft {
+		slog.Info("created draft session",
+			"session_id", sessionID,
+			"run_id", runID,
+			"query", claudeConfig.Query,
+			"working_dir", claudeConfig.WorkingDir,
+			"additional_directories", claudeConfig.AdditionalDirectories)
+
+		// Return the draft session
+		return &Session{
+			ID:        sessionID,
+			RunID:     runID,
+			Status:    StatusDraft,
+			StartTime: startTime,
+			Config:    claudeConfig,
+		}, nil
+	}
+
 	slog.Info("launching Claude session with configuration",
 		"session_id", sessionID,
 		"run_id", runID,
@@ -709,22 +795,29 @@ func (m *Manager) GetSessionInfo(sessionID string) (*Info, error) {
 	}
 
 	info := &Info{
-		ID:              dbSession.ID,
-		RunID:           dbSession.RunID,
-		ClaudeSessionID: dbSession.ClaudeSessionID,
-		ParentSessionID: dbSession.ParentSessionID,
-		Status:          Status(dbSession.Status),
-		StartTime:       dbSession.CreatedAt,
-		LastActivityAt:  dbSession.LastActivityAt,
-		Error:           dbSession.ErrorMessage,
-		Query:           dbSession.Query,
-		Summary:         dbSession.Summary,
-		Title:           dbSession.Title,
-		Model:           dbSession.Model,
-		ModelID:         dbSession.ModelID,
-		WorkingDir:      dbSession.WorkingDir,
-		AutoAcceptEdits: dbSession.AutoAcceptEdits,
-		Archived:        dbSession.Archived,
+		ID:                                  dbSession.ID,
+		RunID:                               dbSession.RunID,
+		ClaudeSessionID:                     dbSession.ClaudeSessionID,
+		ParentSessionID:                     dbSession.ParentSessionID,
+		Status:                              Status(dbSession.Status),
+		StartTime:                           dbSession.CreatedAt,
+		LastActivityAt:                      dbSession.LastActivityAt,
+		Error:                               dbSession.ErrorMessage,
+		Query:                               dbSession.Query,
+		Summary:                             dbSession.Summary,
+		Title:                               dbSession.Title,
+		Model:                               dbSession.Model,
+		ModelID:                             dbSession.ModelID,
+		WorkingDir:                          dbSession.WorkingDir,
+		AutoAcceptEdits:                     dbSession.AutoAcceptEdits,
+		Archived:                            dbSession.Archived,
+		EditorState:                         dbSession.EditorState,
+		DangerouslySkipPermissions:          dbSession.DangerouslySkipPermissions,
+		DangerouslySkipPermissionsExpiresAt: dbSession.DangerouslySkipPermissionsExpiresAt,
+		ProxyEnabled:                        dbSession.ProxyEnabled,
+		ProxyBaseURL:                        dbSession.ProxyBaseURL,
+		ProxyModelOverride:                  dbSession.ProxyModelOverride,
+		ProxyAPIKey:                         dbSession.ProxyAPIKey,
 	}
 
 	if dbSession.CompletedAt != nil {
@@ -791,6 +884,11 @@ func (m *Manager) ListSessions() []Info {
 			Archived:                            dbSession.Archived,
 			DangerouslySkipPermissions:          dbSession.DangerouslySkipPermissions,
 			DangerouslySkipPermissionsExpiresAt: dbSession.DangerouslySkipPermissionsExpiresAt,
+			EditorState:                         dbSession.EditorState,
+			ProxyEnabled:                        dbSession.ProxyEnabled,
+			ProxyBaseURL:                        dbSession.ProxyBaseURL,
+			ProxyModelOverride:                  dbSession.ProxyModelOverride,
+			ProxyAPIKey:                         dbSession.ProxyAPIKey,
 		}
 
 		// Set end time if completed
@@ -930,6 +1028,7 @@ func (m *Manager) processStreamEvent(ctx context.Context, sessionID string, clau
 				EventType:       store.EventTypeSystem,
 				Role:            "system",
 				Content:         fmt.Sprintf("Session created with ID: %s", event.SessionID),
+				ParentToolUseID: event.ParentToolUseID,
 			}
 			if err := m.store.AddConversationEvent(ctx, convEvent); err != nil {
 				return err
@@ -940,12 +1039,13 @@ func (m *Manager) processStreamEvent(ctx context.Context, sessionID string, clau
 				m.eventBus.Publish(bus.Event{
 					Type: bus.EventConversationUpdated,
 					Data: map[string]interface{}{
-						"session_id":        sessionID,
-						"claude_session_id": claudeSessionID,
-						"event_type":        "system",
-						"subtype":           event.Subtype,
-						"content":           fmt.Sprintf("Session created with ID: %s", event.SessionID),
-						"content_type":      "system",
+						"session_id":         sessionID,
+						"claude_session_id":  claudeSessionID,
+						"event_type":         "system",
+						"subtype":            event.Subtype,
+						"content":            fmt.Sprintf("Session created with ID: %s", event.SessionID),
+						"content_type":       "system",
+						"parent_tool_use_id": event.ParentToolUseID,
 					},
 				})
 			}
@@ -969,6 +1069,8 @@ func (m *Manager) processStreamEvent(ctx context.Context, sessionID string, clau
 					modelName = "opus"
 				} else if strings.Contains(lowerModel, "sonnet") {
 					modelName = "sonnet"
+				} else if strings.Contains(lowerModel, "haiku") {
+					modelName = "haiku"
 				}
 
 				// Update session with both model ID and simplified name
@@ -1025,6 +1127,7 @@ func (m *Manager) processStreamEvent(ctx context.Context, sessionID string, clau
 						EventType:       store.EventTypeMessage,
 						Role:            event.Message.Role,
 						Content:         content.Text,
+						ParentToolUseID: event.ParentToolUseID,
 					}
 					if err := m.store.AddConversationEvent(ctx, convEvent); err != nil {
 						return err
@@ -1038,12 +1141,13 @@ func (m *Manager) processStreamEvent(ctx context.Context, sessionID string, clau
 						m.eventBus.Publish(bus.Event{
 							Type: bus.EventConversationUpdated,
 							Data: map[string]interface{}{
-								"session_id":        sessionID,
-								"claude_session_id": claudeSessionID,
-								"event_type":        "message",
-								"role":              event.Message.Role,
-								"content":           content.Text,
-								"content_type":      "text",
+								"session_id":         sessionID,
+								"claude_session_id":  claudeSessionID,
+								"event_type":         "message",
+								"role":               event.Message.Role,
+								"content":            content.Text,
+								"content_type":       "text",
+								"parent_tool_use_id": event.ParentToolUseID,
 							},
 						})
 					}
@@ -1104,6 +1208,7 @@ func (m *Manager) processStreamEvent(ctx context.Context, sessionID string, clau
 						Role:              "user",
 						ToolResultForID:   content.ToolUseID,
 						ToolResultContent: content.Content.Value,
+						ParentToolUseID:   event.ParentToolUseID,
 					}
 					if err := m.store.AddConversationEvent(ctx, convEvent); err != nil {
 						return err
@@ -1128,6 +1233,7 @@ func (m *Manager) processStreamEvent(ctx context.Context, sessionID string, clau
 								"tool_result_for_id":  content.ToolUseID,
 								"tool_result_content": content.Content.Value,
 								"content_type":        "tool_result",
+								"parent_tool_use_id":  event.ParentToolUseID,
 							},
 						})
 					}
@@ -1149,6 +1255,7 @@ func (m *Manager) processStreamEvent(ctx context.Context, sessionID string, clau
 						EventType:       store.EventTypeThinking,
 						Role:            event.Message.Role,
 						Content:         content.Thinking,
+						ParentToolUseID: event.ParentToolUseID,
 					}
 					if err := m.store.AddConversationEvent(ctx, convEvent); err != nil {
 						return err
@@ -1162,12 +1269,13 @@ func (m *Manager) processStreamEvent(ctx context.Context, sessionID string, clau
 						m.eventBus.Publish(bus.Event{
 							Type: bus.EventConversationUpdated,
 							Data: map[string]interface{}{
-								"session_id":        sessionID,
-								"claude_session_id": claudeSessionID,
-								"event_type":        "thinking",
-								"role":              event.Message.Role,
-								"content":           content.Thinking,
-								"content_type":      "thinking",
+								"session_id":         sessionID,
+								"claude_session_id":  claudeSessionID,
+								"event_type":         "thinking",
+								"role":               event.Message.Role,
+								"content":            content.Thinking,
+								"content_type":       "thinking",
+								"parent_tool_use_id": event.ParentToolUseID,
 							},
 						})
 					}
@@ -1387,6 +1495,7 @@ func (m *Manager) ContinueSession(ctx context.Context, req ContinueSessionConfig
 	config := claudecode.SessionConfig{
 		Query:                req.Query,
 		SessionID:            parentSession.ClaudeSessionID, // This triggers --resume flag
+		ForkSession:          true,                          // Enable fork instead of resume
 		OutputFormat:         claudecode.OutputStreamJSON,   // Always use streaming JSON
 		Model:                claudecode.Model(parentSession.Model),
 		WorkingDir:           parentSession.WorkingDir,
@@ -1623,6 +1732,15 @@ func (m *Manager) ContinueSession(ctx context.Context, req ContinueSessionConfig
 		}
 	}
 
+	// Set permission prompt tool to use the injected MCP server
+	if config.PermissionPromptTool == "" {
+		config.PermissionPromptTool = "mcp__codelayer__request_permission"
+		slog.Debug("auto-injected permission_prompt_tool for continued session",
+			"session_id", sessionID,
+			"parent_session_id", req.ParentSessionID,
+			"permission_prompt_tool", config.PermissionPromptTool)
+	}
+
 	// Set proxy URL for resumed session when proxy is enabled
 	if dbSession.ProxyEnabled {
 		if config.Env == nil {
@@ -1801,6 +1919,355 @@ func (m *Manager) InterruptSession(ctx context.Context, sessionID string) error 
 	}
 
 	return nil
+}
+
+// launchDraftWithConfig launches a draft session using the existing launch flow
+func (m *Manager) launchDraftWithConfig(ctx context.Context, sessionID, runID string, config LaunchSessionConfig) error {
+	// Get Claude client (will attempt initialization if needed)
+	client, err := m.getClaudeClient()
+	if err != nil {
+		return fmt.Errorf("cannot launch session: %w", err)
+	}
+
+	claudeConfig := config.SessionConfig
+
+	// Inject daemon's CodeLayer MCP server configuration
+	if claudeConfig.MCPConfig == nil {
+		claudeConfig.MCPConfig = &claudecode.MCPConfig{
+			MCPServers: make(map[string]claudecode.MCPServer),
+		}
+	}
+
+	// Always inject codelayer MCP server (overwrite if exists)
+	claudeConfig.MCPConfig.MCPServers["codelayer"] = claudecode.MCPServer{
+		Command: hldconfig.DefaultCLICommand,
+		Args:    []string{"mcp", "claude_approvals"},
+		Env: map[string]string{
+			"HUMANLAYER_SESSION_ID":    sessionID,
+			"HUMANLAYER_DAEMON_SOCKET": m.socketPath,
+		},
+	}
+
+	// Add HUMANLAYER_RUN_ID and HUMANLAYER_DAEMON_SOCKET to MCP server environment
+	// For HTTP servers, inject session ID header
+	if claudeConfig.MCPConfig != nil {
+		for name, server := range claudeConfig.MCPConfig.MCPServers {
+			// Check if this is an HTTP MCP server
+			if server.Type == "http" {
+				if server.Headers == nil {
+					server.Headers = make(map[string]string)
+				}
+				if _, exists := server.Headers["X-Session-ID"]; !exists {
+					server.Headers["X-Session-ID"] = sessionID
+				}
+			} else {
+				if server.Env == nil {
+					server.Env = make(map[string]string)
+				}
+				server.Env["HUMANLAYER_RUN_ID"] = runID
+				if m.socketPath != "" {
+					server.Env["HUMANLAYER_DAEMON_SOCKET"] = m.socketPath
+				}
+			}
+			claudeConfig.MCPConfig.MCPServers[name] = server
+		}
+	}
+
+	// Set permission prompt tool to use the injected MCP server
+	if claudeConfig.PermissionPromptTool == "" {
+		claudeConfig.PermissionPromptTool = "mcp__codelayer__request_permission"
+		slog.Debug("auto-injected permission_prompt_tool for draft",
+			"session_id", sessionID,
+			"permission_prompt_tool", claudeConfig.PermissionPromptTool)
+	}
+
+	// Set proxy URL for this session ONLY when proxy is explicitly enabled
+	if config.ProxyEnabled {
+		if claudeConfig.Env == nil {
+			claudeConfig.Env = make(map[string]string)
+		}
+		m.mu.RLock()
+		httpPort := m.httpPort
+		m.mu.RUnlock()
+		if httpPort == 0 {
+			httpPort = 7777 // fallback to default
+		}
+		proxyURL := fmt.Sprintf("http://localhost:%d/api/v1/anthropic_proxy/%s", httpPort, sessionID)
+		claudeConfig.Env["ANTHROPIC_BASE_URL"] = proxyURL
+		claudeConfig.Env["ANTHROPIC_API_KEY"] = "proxy-handled"
+	}
+
+	// Launch Claude session
+	slog.Info("launching draft session with Claude",
+		"session_id", sessionID,
+		"run_id", runID,
+		"query", claudeConfig.Query,
+		"working_dir", claudeConfig.WorkingDir)
+
+	claudeSession, err := client.Launch(claudeConfig)
+	if err != nil {
+		slog.Error("failed to launch Claude session from draft",
+			"session_id", sessionID,
+			"error", err)
+		m.updateSessionStatus(ctx, sessionID, StatusFailed, err.Error())
+		return fmt.Errorf("failed to launch Claude session: %w", err)
+	}
+
+	// Wrap the session for storage
+	wrappedSession := NewClaudeSessionWrapper(claudeSession)
+
+	// Store active Claude process
+	m.mu.Lock()
+	m.activeProcesses[sessionID] = wrappedSession
+	m.mu.Unlock()
+
+	// Update database with running status
+	statusRunning := string(StatusRunning)
+	now := time.Now()
+	update := store.SessionUpdate{
+		Status:         &statusRunning,
+		LastActivityAt: &now,
+	}
+	if err := m.store.UpdateSession(ctx, sessionID, update); err != nil {
+		slog.Error("failed to update session status to running", "error", err)
+		// Continue anyway
+	}
+
+	// Publish status change event
+	if m.eventBus != nil {
+		event := bus.Event{
+			Type: bus.EventSessionStatusChanged,
+			Data: map[string]interface{}{
+				"session_id": sessionID,
+				"run_id":     runID,
+				"old_status": string(StatusStarting),
+				"new_status": string(StatusRunning),
+			},
+		}
+		m.eventBus.Publish(event)
+	}
+
+	// Store query for injection after Claude session ID is captured
+	m.pendingQueries.Store(sessionID, claudeConfig.Query)
+
+	// Monitor session lifecycle in background
+	go m.monitorSession(ctx, sessionID, runID, wrappedSession, time.Now(), claudeConfig)
+
+	// Reconcile any existing approvals for this run_id
+	if m.approvalReconciler != nil {
+		go func() {
+			select {
+			case <-time.After(2 * time.Second):
+				// Continue with reconciliation
+			case <-ctx.Done():
+				// Context cancelled, exit early
+				return
+			}
+
+			if err := m.approvalReconciler.ReconcileApprovalsForSession(ctx, runID); err != nil {
+				slog.Error("failed to reconcile approvals for launched draft session",
+					"session_id", sessionID,
+					"run_id", runID,
+					"error", err)
+			}
+		}()
+	}
+
+	slog.Info("successfully launched draft session",
+		"session_id", sessionID,
+		"run_id", runID,
+		"query", claudeConfig.Query)
+
+	return nil
+}
+
+// LaunchDraftSession launches a draft session by transitioning it to running state
+func (m *Manager) LaunchDraftSession(ctx context.Context, sessionID string, prompt string, createDirectoryIfNotExists bool) error {
+	// Get the session from store
+	sess, err := m.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get session: %w", err)
+	}
+
+	// Check if session is in draft state
+	if sess.Status != store.SessionStatusDraft {
+		return fmt.Errorf("session is not in draft state: current status is %s", sess.Status)
+	}
+
+	// Validate and potentially create working directory BEFORE updating status
+	// This keeps the session in draft state if validation fails
+	if sess.WorkingDir != "" {
+		// Expand ~ if present
+		workingDir := sess.WorkingDir
+		if strings.HasPrefix(workingDir, "~") {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("failed to get home directory: %w", err)
+			}
+			workingDir = strings.Replace(workingDir, "~", home, 1)
+		}
+
+		// Check directory status
+		info, err := os.Stat(workingDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Directory doesn't exist
+				if createDirectoryIfNotExists {
+					slog.Info("Creating working directory for draft session",
+						"path", workingDir,
+						"session_id", sessionID)
+
+					// Create with parent directories
+					if err := os.MkdirAll(workingDir, 0755); err != nil {
+						return fmt.Errorf("failed to create working directory %s: %w", workingDir, err)
+					}
+
+					slog.Info("Successfully created working directory for draft session",
+						"path", workingDir,
+						"session_id", sessionID)
+				} else {
+					// Return specific error that client can handle (422)
+					return &DirectoryNotFoundError{
+						Path:    workingDir,
+						Message: fmt.Sprintf("working directory does not exist: %s", workingDir),
+					}
+				}
+			} else {
+				// Other error (permissions, etc.)
+				return fmt.Errorf("error accessing working directory %s: %w", workingDir, err)
+			}
+		} else {
+			// Path exists - verify it's a directory
+			if !info.IsDir() {
+				return fmt.Errorf("working directory path exists but is not a directory: %s", workingDir)
+			}
+		}
+	}
+
+	// Update the query with the actual prompt and clear editor state
+	queryUpdate := prompt
+	summaryUpdate := CalculateSummary(prompt)
+	statusStarting := string(StatusStarting)
+	now := time.Now()
+	emptyString := "" // Use empty string to clear editor state
+	update := store.SessionUpdate{
+		Status:         &statusStarting,
+		Query:          &queryUpdate,
+		Summary:        &summaryUpdate,
+		LastActivityAt: &now,
+		EditorState:    &emptyString, // Clear editor state when launching
+	}
+	if err := m.store.UpdateSession(ctx, sessionID, update); err != nil {
+		return fmt.Errorf("failed to update draft session: %w", err)
+	}
+
+	// The rest of the launch logic is already handled by the existing session monitoring
+	// We just need to transition from draft to starting and let the existing flow take over
+
+	// Reconstruct the config from stored session
+	claudeConfig := claudecode.SessionConfig{
+		Query:                prompt, // Use the provided prompt
+		OutputFormat:         claudecode.OutputStreamJSON,
+		WorkingDir:           sess.WorkingDir,
+		SystemPrompt:         sess.SystemPrompt,
+		AppendSystemPrompt:   sess.AppendSystemPrompt,
+		CustomInstructions:   sess.CustomInstructions,
+		PermissionPromptTool: sess.PermissionPromptTool,
+		MaxTurns:             sess.MaxTurns,
+	}
+
+	// Set model if available
+	if sess.Model != "" {
+		claudeConfig.Model = claudecode.Model(sess.Model)
+	}
+
+	// Deserialize JSON arrays for tools and directories
+	if sess.AllowedTools != "" {
+		var allowedTools []string
+		if err := json.Unmarshal([]byte(sess.AllowedTools), &allowedTools); err == nil {
+			claudeConfig.AllowedTools = allowedTools
+		}
+	}
+	if sess.DisallowedTools != "" {
+		var disallowedTools []string
+		if err := json.Unmarshal([]byte(sess.DisallowedTools), &disallowedTools); err == nil {
+			claudeConfig.DisallowedTools = disallowedTools
+		}
+	}
+	if sess.AdditionalDirectories != "" {
+		var additionalDirs []string
+		if err := json.Unmarshal([]byte(sess.AdditionalDirectories), &additionalDirs); err == nil {
+			claudeConfig.AdditionalDirectories = additionalDirs
+		}
+	}
+
+	// Retrieve and reconstruct MCP configuration from database
+	mcpServers, err := m.store.GetMCPServers(ctx, sessionID)
+	if err == nil && len(mcpServers) > 0 {
+		claudeConfig.MCPConfig = &claudecode.MCPConfig{
+			MCPServers: make(map[string]claudecode.MCPServer),
+		}
+		for _, server := range mcpServers {
+			var args []string
+			var env map[string]string
+			if err := json.Unmarshal([]byte(server.ArgsJSON), &args); err != nil {
+				slog.Warn("failed to unmarshal MCP server args", "error", err, "server", server.Name)
+				args = []string{}
+			}
+			if err := json.Unmarshal([]byte(server.EnvJSON), &env); err != nil {
+				slog.Warn("failed to unmarshal MCP server env", "error", err, "server", server.Name)
+				env = map[string]string{}
+			}
+
+			// Check if this is an HTTP server (stored with command="http")
+			if server.Command == "http" {
+				// HTTP server - extract URL from args and headers from env
+				var urls []string
+				if err := json.Unmarshal([]byte(server.ArgsJSON), &urls); err == nil && len(urls) > 0 {
+					claudeConfig.MCPConfig.MCPServers[server.Name] = claudecode.MCPServer{
+						Type:    "http",
+						URL:     urls[0],
+						Headers: env, // Headers were stored in EnvJSON
+					}
+				}
+			} else {
+				// Traditional stdio server
+				claudeConfig.MCPConfig.MCPServers[server.Name] = claudecode.MCPServer{
+					Command: server.Command,
+					Args:    args,
+					Env:     env,
+				}
+			}
+		}
+		slog.Debug("reconstructed MCP servers from draft session",
+			"session_id", sessionID,
+			"mcp_server_count", len(mcpServers))
+	}
+
+	// Build the launch config
+	launchConfig := LaunchSessionConfig{
+		SessionConfig:              claudeConfig,
+		Title:                      sess.Title,
+		AutoAcceptEdits:            sess.AutoAcceptEdits,
+		DangerouslySkipPermissions: sess.DangerouslySkipPermissions,
+		ProxyEnabled:               sess.ProxyEnabled,
+		ProxyBaseURL:               sess.ProxyBaseURL,
+		ProxyModelOverride:         sess.ProxyModelOverride,
+		ProxyAPIKey:                sess.ProxyAPIKey,
+	}
+
+	// If dangerously skip permissions has an expiry, calculate the timeout
+	if sess.DangerouslySkipPermissions && sess.DangerouslySkipPermissionsExpiresAt != nil {
+		timeout := time.Until(*sess.DangerouslySkipPermissionsExpiresAt).Milliseconds()
+		if timeout > 0 {
+			timeoutInt64 := int64(timeout)
+			launchConfig.DangerouslySkipPermissionsTimeout = &timeoutInt64
+		}
+	}
+
+	// Actually launch the session using the existing flow
+	// We need to launch it properly with Claude, not just update the database
+	return m.launchDraftWithConfig(ctx, sessionID, sess.RunID, launchConfig)
 }
 
 // injectQueryAsFirstEvent adds the user's query as the first conversation event

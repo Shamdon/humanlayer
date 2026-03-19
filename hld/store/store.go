@@ -13,9 +13,11 @@ type ConversationStore interface {
 	// Session operations
 	CreateSession(ctx context.Context, session *Session) error
 	UpdateSession(ctx context.Context, sessionID string, updates SessionUpdate) error
+	HardDeleteSession(ctx context.Context, sessionID string) error
 	GetSession(ctx context.Context, sessionID string) (*Session, error)
 	GetSessionByRunID(ctx context.Context, runID string) (*Session, error)
 	ListSessions(ctx context.Context) ([]*Session, error)
+	SearchSessionsByTitle(ctx context.Context, query string, limit int) ([]*Session, error)
 	// GetExpiredDangerousPermissionsSessions returns sessions where dangerous permissions have expired
 	GetExpiredDangerousPermissionsSessions(ctx context.Context) ([]*Session, error)
 
@@ -106,6 +108,7 @@ type Session struct {
 	AutoAcceptEdits                     bool       `db:"auto_accept_edits"`
 	DangerouslySkipPermissions          bool       `db:"dangerously_skip_permissions"`
 	DangerouslySkipPermissionsExpiresAt *time.Time `db:"dangerously_skip_permissions_expires_at"`
+	DangerouslySkipPermissionsTimeoutMs *int64     `db:"dangerously_skip_permissions_timeout_ms"`
 	Archived                            bool       // New field for session archiving
 
 	// Proxy configuration
@@ -113,11 +116,15 @@ type Session struct {
 	ProxyBaseURL       string `db:"proxy_base_url"`
 	ProxyModelOverride string `db:"proxy_model_override"`
 	ProxyAPIKey        string `db:"proxy_api_key"`
+
+	// Editor state for draft sessions (JSON blob)
+	EditorState *string `db:"editor_state"`
 }
 
 // SessionUpdate contains fields that can be updated
 type SessionUpdate struct {
 	ClaudeSessionID                     *string
+	Query                               *string // For updating draft session queries
 	Summary                             *string
 	Title                               *string // New field for updating title
 	Status                              *string
@@ -136,6 +143,7 @@ type SessionUpdate struct {
 	AutoAcceptEdits                     *bool       `db:"auto_accept_edits"`
 	DangerouslySkipPermissions          *bool       `db:"dangerously_skip_permissions"`
 	DangerouslySkipPermissionsExpiresAt **time.Time `db:"dangerously_skip_permissions_expires_at"`
+	DangerouslySkipPermissionsTimeoutMs *int64      `db:"dangerously_skip_permissions_timeout_ms"`
 	Model                               *string
 	ModelID                             *string // Full model identifier
 	Archived                            *bool   // New field for updating archived status
@@ -145,6 +153,10 @@ type SessionUpdate struct {
 	ProxyBaseURL       *string `db:"proxy_base_url"`
 	ProxyModelOverride *string `db:"proxy_model_override"`
 	ProxyAPIKey        *string `db:"proxy_api_key"`
+	// Working directory field
+	WorkingDir *string `db:"working_dir"`
+	// Editor state field (JSON blob)
+	EditorState *string `db:"editor_state"`
 }
 
 // ConversationEvent represents a single event in a conversation
@@ -261,6 +273,7 @@ const (
 
 // SessionStatus constants
 const (
+	SessionStatusDraft        = "draft"
 	SessionStatusStarting     = "starting"
 	SessionStatusRunning      = "running"
 	SessionStatusCompleted    = "completed"
@@ -268,6 +281,7 @@ const (
 	SessionStatusWaitingInput = "waiting_input"
 	SessionStatusInterrupting = "interrupting" // Session received interrupt signal and is shutting down
 	SessionStatusInterrupted  = "interrupted"  // Session was interrupted but can be resumed
+	SessionStatusDiscarded    = "discarded"    // Draft session was discarded by the user
 )
 
 // Helper functions for converting between store types and Claude types

@@ -6,6 +6,8 @@ import { notificationService } from '@/services/NotificationService'
 import { HotkeyScope } from '@/hooks/hotkeys/scopes'
 import { useStore } from '@/AppStore'
 import { ResponseInputLocalStorageKey } from './useSessionActions'
+import { usePostHogTracking } from '@/hooks/usePostHogTracking'
+import { POSTHOG_EVENTS } from '@/lib/telemetry/events'
 
 /*
   Much of this state-based code should be ported to Zustand.
@@ -18,6 +20,7 @@ interface UseSessionApprovalsProps {
   setFocusedEventId: (id: number | null) => void
   setFocusSource?: (source: 'mouse' | 'keyboard' | null) => void
   scope: HotkeyScope
+  onStartDeny?: () => void // Callback when denial mode is entered
 }
 
 export function useSessionApprovals({
@@ -27,6 +30,7 @@ export function useSessionApprovals({
   setFocusedEventId,
   setFocusSource,
   scope,
+  onStartDeny,
 }: UseSessionApprovalsProps) {
   // sessionId may be used in future for session-specific approvals
   void sessionId
@@ -34,6 +38,7 @@ export function useSessionApprovals({
   const [confirmingApprovalId, setConfirmingApprovalId] = useState<string | null>(null)
   const [denyingApprovalId, setDenyingApprovalId] = useState<string | null>(null)
   const responseEditor = useStore(state => state.responseEditor)
+  const { trackEvent } = usePostHogTracking()
 
   // Helper to check if element is in view
   const isElementInView = useCallback((elementId: number) => {
@@ -50,19 +55,30 @@ export function useSessionApprovals({
   }, [])
 
   // Approval handlers
-  const handleApprove = useCallback(async (approvalId: string) => {
-    try {
-      setApprovingApprovalId(approvalId)
-      await daemonClient.approveFunctionCall(approvalId)
-    } catch (error) {
-      notificationService.notifyError(error, 'Failed to approve')
-    } finally {
-      setApprovingApprovalId(null)
-    }
-  }, [])
+  const handleApprove = useCallback(
+    async (approvalId: string) => {
+      const startTime = Date.now()
+      try {
+        setApprovingApprovalId(approvalId)
+        await daemonClient.approveFunctionCall(approvalId)
+
+        // Track approval responded event
+        trackEvent(POSTHOG_EVENTS.APPROVAL_RESPONDED, {
+          response: 'approve',
+          response_time_ms: Date.now() - startTime,
+        })
+      } catch (error) {
+        notificationService.notifyError(error, 'Failed to approve')
+      } finally {
+        setApprovingApprovalId(null)
+      }
+    },
+    [trackEvent],
+  )
 
   const handleDeny = useCallback(
     async (approvalId: string, reason: string, sessionId: string) => {
+      const startTime = Date.now()
       try {
         const res = await daemonClient.denyFunctionCall(approvalId, reason)
         console.log('handleDeny()', res)
@@ -70,6 +86,12 @@ export function useSessionApprovals({
         if (res.success) {
           responseEditor?.commands.setContent('')
           localStorage.removeItem(`${ResponseInputLocalStorageKey}.${sessionId}`)
+
+          // Track approval responded event
+          trackEvent(POSTHOG_EVENTS.APPROVAL_RESPONDED, {
+            response: 'reject',
+            response_time_ms: Date.now() - startTime,
+          })
         } else {
           console.log('WHAT', res)
         }
@@ -79,7 +101,7 @@ export function useSessionApprovals({
         notificationService.notifyError(error, 'Failed to deny')
       }
     },
-    [responseEditor],
+    [responseEditor, trackEvent],
   )
 
   const denyAgainstOldestApproval = useCallback(() => {
@@ -87,19 +109,30 @@ export function useSessionApprovals({
       e => e.approvalStatus === ApprovalStatus.Pending && e.approvalId && e.id !== undefined,
     )
     if (oldestApproval) {
+      // Call the callback to clear fork state if needed
+      onStartDeny?.()
+
       setDenyingApprovalId(oldestApproval.approvalId!)
       // focus the oldest approval
       setFocusedEventId(oldestApproval.id)
       setFocusSource?.('keyboard')
     }
-  }, [events, setFocusedEventId, setFocusSource])
+  }, [events, setFocusedEventId, setFocusSource, onStartDeny])
 
   const handleStartDeny = useCallback(
     (approvalId: string) => {
+      // Call the callback to clear fork state if needed
+      onStartDeny?.()
+
       setDenyingApprovalId(approvalId)
-      responseEditor?.commands.focus()
+
+      // Use setTimeout to ensure focus happens after all browser event handling
+      // This works around the browser's default focus behavior on button clicks
+      setTimeout(() => {
+        responseEditor?.commands.focus()
+      }, 0)
     },
-    [responseEditor],
+    [responseEditor, onStartDeny],
   )
 
   const handleCancelDeny = useCallback(() => {

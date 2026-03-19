@@ -199,24 +199,118 @@ humanlayer thoughts <subcommand>
 - `sync` - Manually sync thoughts and update searchable index
 - `status` - Check the status of your thoughts setup
 - `config` - View or edit thoughts configuration
+- `uninit` - Remove thoughts setup from current repository
+- `profile` - Manage thoughts profiles (for multiple thoughts repositories)
+
+**Profile Management:**
+
+The thoughts system supports multiple profiles, allowing you to maintain separate thoughts repositories for different organizational contexts (e.g., personal projects, different clients).
+
+```bash
+# Create a new profile
+humanlayer thoughts profile create <name> [--repo <path>] [--repos-dir <name>] [--global-dir <name>]
+
+# List all profiles
+humanlayer thoughts profile list [--json]
+
+# Show profile details
+humanlayer thoughts profile show <name> [--json]
+
+# Delete a profile
+humanlayer thoughts profile delete <name> [--force]
+```
 
 **Examples:**
 
 ```bash
-# Initialize thoughts for a new project
+# Initialize thoughts for a new project (default profile)
 humanlayer thoughts init
 
-# Sync thoughts after making changes
+# Create a profile for personal projects
+humanlayer thoughts profile create personal --repo ~/thoughts-personal
+
+# Initialize a repo with a specific profile
+cd ~/projects/personal-app
+humanlayer thoughts init --profile personal
+
+# Sync thoughts (automatically uses the correct profile's repository)
 humanlayer thoughts sync -m "Updated architecture notes"
 
-# Check status
+# Check status (shows which profile is active)
 humanlayer thoughts status
 
-# View configuration
-humanlayer thoughts config --json
+# View all profiles and configuration
+humanlayer thoughts config
+
+# List all configured profiles
+humanlayer thoughts profile list
 ```
 
-The thoughts system keeps your notes separate from code while making them easily accessible to AI assistants. See the [Thoughts documentation](./THOUGHTS.md) for detailed information.
+**Profile Features:**
+
+- **Multiple Repositories**: Each profile can have its own thoughts repository location
+- **Automatic Resolution**: Commands automatically use the correct profile based on repository mappings
+- **Backward Compatible**: Existing configurations without profiles continue to work unchanged
+- **Per-Repository Profiles**: Different repositories can use different profiles, even worktrees of the same repo
+
+The thoughts system keeps your notes separate from code while making them easily accessible to AI assistants.
+
+### `claude`
+
+Manage Claude Code configuration.
+
+```bash
+humanlayer claude <subcommand>
+```
+
+**Subcommands:**
+
+- `init` - Initialize Claude Code configuration in current directory
+
+**Examples:**
+
+```bash
+# Initialize Claude Code configuration interactively
+humanlayer claude init
+
+# Copy all files without prompting
+humanlayer claude init --all
+
+# Force overwrite existing .claude directory
+humanlayer claude init --force
+```
+
+#### Interactive Selection
+
+The `claude init` command provides an interactive experience with arrow key navigation:
+
+- Use **↑↓** arrow keys to navigate options
+- Press **space** to toggle selections
+- Press **enter** to confirm your choices
+- Press **Ctrl+C** to cancel at any time
+
+#### What Gets Copied
+
+The command copies Claude Code configuration files to your project's `.claude` directory:
+
+- **Commands** (30 files) - Workflow commands for planning, research, CI, code generation, testing, and more
+- **Agents** (6 files) - Specialized sub-agents for code analysis, debugging, and architecture review
+- **Settings** (1 file) - Project permissions configuration (`settings.local.json` is excluded via `.gitignore`)
+
+#### Command Options
+
+- `--all` - Copy all files without prompting (useful for CI/CD or automated setup)
+- `--force` - Overwrite existing `.claude` directory without confirmation
+
+#### Non-Interactive Mode
+
+For automated environments (CI/CD, scripts), use the `--all` flag:
+
+```bash
+humanlayer claude init --all
+```
+
+Without `--all`, the command requires an interactive terminal and will exit with an error in non-TTY environments.
 
 ## Use Cases
 

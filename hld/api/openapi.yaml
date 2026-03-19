@@ -13,6 +13,36 @@ servers:
     description: Local daemon server
 
 paths:
+  /fuzzy-search/files:
+    post:
+      operationId: fuzzySearchFiles
+      summary: Fuzzy search for files and folders
+      description: |
+        Performs fuzzy matching on file and folder paths within specified directories.
+        Returns matches sorted by relevance with character-level highlighting information.
+
+        Respects .gitignore by default. Search completes within 5 seconds or returns
+        partial results with timeout error.
+      tags:
+        - Files
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FuzzySearchFilesRequest'
+      responses:
+        '200':
+          description: Search completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FuzzySearchFilesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /health:
     get:
       operationId: getHealth
@@ -43,6 +73,65 @@ paths:
               schema:
                 $ref: '#/components/schemas/DebugInfoResponse'
 
+  /validate-directory:
+    post:
+      operationId: validateDirectory
+      summary: Validate directory existence
+      description: Check if a directory exists and whether it can be created
+      tags:
+        - Files
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ValidateDirectoryRequest'
+      responses:
+        '200':
+          description: Directory validation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidateDirectoryResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /directories:
+    post:
+      operationId: createDirectory
+      summary: Create a directory
+      description: Create a directory and any necessary parent directories
+      tags:
+        - Files
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path:
+                  type: string
+                  description: The directory path to create
+              required:
+                - path
+      responses:
+        '200':
+          description: Directory created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path:
+                    type: string
+                    description: The created directory path
+                  created:
+                    type: boolean
+                    description: Whether the directory was created
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /sessions:
     post:
       operationId: createSession
@@ -65,6 +154,12 @@ paths:
                 $ref: '#/components/schemas/CreateSessionResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '422':
+          description: Directory does not exist and needs to be created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DirectoryNotFoundResponse'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -73,28 +168,27 @@ paths:
       summary: List sessions
       description: |
         List all sessions with optional filtering. By default returns only leaf sessions
-        (sessions with no children). Set leafOnly=false to get all sessions.
+        (sessions with no children). Set leavesOnly=false to get all sessions.
       tags:
         - Sessions
       parameters:
-        - name: leafOnly
+        - name: leavesOnly
           in: query
-          description: Return only leaf sessions (no children)
+          description: Return only leaf sessions (sessions with no children)
           schema:
             type: boolean
             default: true
-        - name: includeArchived
+        - name: filter
           in: query
-          description: Include archived sessions in results
+          description: Filter sessions by type
           schema:
-            type: boolean
-            default: false
-        - name: archivedOnly
-          in: query
-          description: Return only archived sessions
-          schema:
-            type: boolean
-            default: false
+            type: string
+            enum: [normal, archived, draft]
+            description: |
+              - normal: non-archived, non-draft sessions
+              - archived: archived sessions only
+              - draft: draft sessions only
+              When omitted, returns ALL sessions (no filtering)
       responses:
         '200':
           description: List of sessions
@@ -149,6 +243,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SessionResponse'
+        '400':
+          description: Invalid status transition or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -178,6 +278,102 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ContinueSessionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /sessions/{id}/launch:
+    post:
+      operationId: launchDraftSession
+      summary: Launch a draft session
+      description: Launch a draft session, transitioning it from draft to running state
+      tags:
+        - Sessions
+      parameters:
+        - $ref: '#/components/parameters/sessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                prompt:
+                  type: string
+                  description: Initial prompt to send to Claude
+                createDirectoryIfNotExists:
+                  type: boolean
+                  description: Create working directory if it doesn't exist
+                  default: false
+              required:
+                - prompt
+      responses:
+        '200':
+          description: Session launched successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400':
+          description: Session is not in draft state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: Directory does not exist and needs to be created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DirectoryNotFoundResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    delete:
+      operationId: deleteDraftSession
+      summary: Delete a draft session
+      description: Delete a draft session that has not been launched yet
+      tags:
+        - Sessions
+      parameters:
+        - $ref: '#/components/parameters/sessionId'
+      responses:
+        '204':
+          description: Draft session deleted successfully
+        '400':
+          description: Session is not in draft state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /sessions/{id}/hard-delete-empty:
+    delete:
+      operationId: hardDeleteEmptyDraftSession
+      summary: Permanently delete an empty draft session
+      description: |
+        Permanently delete a draft or discarded session from the database if it is truly empty.
+        A session is considered empty if it has no meaningful content (no title, no query, default model, no editor state).
+      tags:
+        - Sessions
+      parameters:
+        - $ref: '#/components/parameters/sessionId'
+      responses:
+        '204':
+          description: Empty draft session permanently deleted
+        '400':
+          description: Session is not empty or not a draft/discarded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -289,6 +485,77 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /sessions/restore:
+    post:
+      operationId: bulkRestoreDrafts
+      summary: Restore multiple discarded draft sessions
+      description: Restore multiple discarded draft sessions back to draft status
+      tags:
+        - Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkRestoreDraftsRequest'
+      responses:
+        '200':
+          description: All drafts restored successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkRestoreDraftsResponse'
+        '207':
+          description: Partial success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkRestoreDraftsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /sessions/search:
+    get:
+      operationId: searchSessions
+      summary: Search sessions
+      description: |
+        Search for sessions using SQL LIKE queries across title, summary, and query fields.
+        Only returns "normal" leaf sessions (not archived, not draft, not discarded, no children).
+        Returns top sessions ordered by last_activity_at descending.
+        Limited to 20 most recently modified sessions for performance.
+      tags:
+        - Sessions
+      parameters:
+        - name: query
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 100
+          description: Search query for matching against title, summary, or query fields (uses SQL LIKE)
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+          description: Maximum number of results to return
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionSearchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /recent-paths:
     get:
       operationId: getRecentPaths
@@ -312,6 +579,76 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RecentPathsResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /slash-commands:
+    get:
+      operationId: getSlashCommands
+      summary: Get available slash commands
+      description: Retrieve slash commands available in the specified working directory
+      tags:
+        - Sessions
+      parameters:
+        - name: working_dir
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Working directory to search for commands
+        - name: query
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Fuzzy search query
+      responses:
+        '200':
+          description: List of slash commands
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SlashCommandsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /agents/discover:
+    post:
+      summary: Discover available agents
+      description: Discovers agent definitions from .claude/agents directories
+      operationId: discoverAgents
+      tags:
+        - Agents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - workingDir
+              properties:
+                workingDir:
+                  type: string
+                  description: Session working directory for local agent discovery
+      responses:
+        '200':
+          description: Successfully discovered agents
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - agents
+                properties:
+                  agents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Agent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -614,6 +951,113 @@ components:
       example: appr_xyz789
 
   schemas:
+    # Fuzzy Search Schemas
+    FuzzySearchFilesRequest:
+      type: object
+      required:
+        - query
+        - paths
+      properties:
+        query:
+          type: string
+          description: Fuzzy search pattern
+          example: "handleFuzzy"
+          minLength: 1
+          maxLength: 256
+        paths:
+          type: array
+          description: Directory paths to search within
+          minItems: 1
+          maxItems: 10
+          items:
+            type: string
+            example: "/Users/dev/project"
+        limit:
+          type: integer
+          description: Maximum number of results to return
+          default: 20
+          minimum: 1
+          maximum: 1000
+        filesOnly:
+          type: boolean
+          description: Return only files, exclude directories
+          default: false
+        respectGitignore:
+          type: boolean
+          description: Filter out files/folders matching .gitignore patterns
+          default: true
+
+    FuzzySearchFilesResponse:
+      type: object
+      required:
+        - results
+        - metadata
+      properties:
+        results:
+          type: array
+          description: Matched files/folders sorted by relevance
+          items:
+            $ref: '#/components/schemas/FileMatch'
+        metadata:
+          $ref: '#/components/schemas/SearchMetadata'
+
+    FileMatch:
+      type: object
+      required:
+        - path
+        - displayPath
+        - score
+        - matchedIndexes
+        - isDirectory
+      properties:
+        path:
+          type: string
+          description: Absolute path to matched file or folder
+          example: "/Users/dev/project/src/handlers/fuzzySearch.go"
+        displayPath:
+          type: string
+          description: Relative path for display (relative to first search path if applicable)
+          example: "src/handlers/fuzzySearch.go"
+        score:
+          type: integer
+          description: Match quality score (higher is better)
+          example: 85
+        matchedIndexes:
+          type: array
+          description: Character positions of matched query characters
+          items:
+            type: integer
+          example: [23, 31, 36, 37, 38, 39]
+        isDirectory:
+          type: boolean
+          description: True if this is a directory, false for files
+          example: false
+
+    SearchMetadata:
+      type: object
+      required:
+        - totalScanned
+        - totalMatches
+        - durationMs
+        - timedOut
+      properties:
+        totalScanned:
+          type: integer
+          description: Total number of files/folders scanned
+          example: 15437
+        totalMatches:
+          type: integer
+          description: Total matches found before applying limit
+          example: 42
+        durationMs:
+          type: integer
+          description: Search duration in milliseconds
+          example: 156
+        timedOut:
+          type: boolean
+          description: True if search was terminated due to timeout
+          example: false
+
     # Health Response
     HealthResponse:
       type: object
@@ -844,10 +1288,16 @@ components:
           type: string
           description: Model to use with the proxy
           example: openai/gpt-oss-120b
+        editor_state:
+          type: string
+          nullable: true
+          description: JSON blob of editor state for draft sessions
+          example: '{"content":"console.log(\"hello\");","cursorPosition":24}'
 
     SessionStatus:
       type: string
       enum:
+        - draft
         - starting
         - running
         - completed
@@ -855,6 +1305,7 @@ components:
         - interrupting
         - interrupted
         - waiting_input
+        - discarded
       description: Current status of the session
 
     CreateSessionRequest:
@@ -872,7 +1323,7 @@ components:
           example: "CSV Processing Script"
         model:
           type: string
-          enum: [opus, sonnet]
+          enum: [opus, sonnet, haiku]
           description: Model to use for the session
         mcp_config:
           $ref: '#/components/schemas/MCPConfig'
@@ -949,6 +1400,14 @@ components:
         proxy_api_key:
           type: string
           description: API key for proxy authentication
+        draft:
+          type: boolean
+          description: Create session in draft state without launching Claude
+          default: false
+        createDirectoryIfNotExists:
+          type: boolean
+          description: Create the working directory if it does not exist
+          default: false
 
     CreateSessionResponse:
       type: object
@@ -970,6 +1429,64 @@ components:
               description: Created run ID
               example: run_new456
 
+    ValidateDirectoryRequest:
+      type: object
+      required:
+        - path
+      properties:
+        path:
+          type: string
+          description: Directory path to validate
+          example: /home/user/new-project
+
+    ValidateDirectoryResponse:
+      type: object
+      required:
+        - exists
+        - expandedPath
+      properties:
+        exists:
+          type: boolean
+          description: Whether the directory exists
+        isDirectory:
+          type: boolean
+          description: Whether the path is a directory (only set if exists is true)
+        canCreate:
+          type: boolean
+          description: Whether the directory can be created (only set if exists is false)
+        expandedPath:
+          type: string
+          description: The expanded path with ~ resolved
+          example: /home/user/new-project
+        error:
+          type: string
+          description: Error message if path validation failed
+
+    DirectoryNotFoundResponse:
+      type: object
+      required:
+        - error
+        - message
+        - path
+        - requiresCreation
+      properties:
+        error:
+          type: string
+          description: Error code
+          example: directory_not_found
+        message:
+          type: string
+          description: Human-readable error message
+          example: working directory does not exist /home/user/new-project
+        path:
+          type: string
+          description: The directory path that does not exist
+          example: /home/user/new-project
+        requiresCreation:
+          type: boolean
+          description: Indicates that directory creation is required
+          example: true
+
     SessionResponse:
       type: object
       required:
@@ -987,6 +1504,29 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Session'
+        counts:
+          type: object
+          description: Session counts by category
+          properties:
+            normal:
+              type: integer
+              description: Number of normal (non-archived, non-draft) sessions
+            archived:
+              type: integer
+              description: Number of archived sessions
+            draft:
+              type: integer
+              description: Number of draft sessions
+
+    SessionSearchResponse:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Session"
 
     UpdateSessionRequest:
       type: object
@@ -1041,6 +1581,17 @@ components:
             type: string
           description: Update additional directories Claude can access
           example: ["~/.humanlayer/logs", "/var/log/myapp"]
+        working_dir:
+          type: string
+          description: Update the working directory for the session
+          example: "/Users/john/projects/myapp"
+        editor_state:
+          type: string
+          description: JSON blob of editor state for draft sessions
+          example: '{"content":"console.log(\"hello\");","cursorPosition":24}'
+        status:
+          $ref: '#/components/schemas/SessionStatus'
+          description: Update session status (only draft ↔ discarded transitions allowed)
 
     ContinueSessionRequest:
       type: object
@@ -1281,6 +1832,39 @@ components:
               description: Sessions that failed to update
               example: ["sess_789"]
 
+    BulkRestoreDraftsRequest:
+      type: object
+      required:
+        - session_ids
+      properties:
+        session_ids:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: Draft sessions to restore from discarded status
+          example: ["sess_123", "sess_456"]
+
+    BulkRestoreDraftsResponse:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          required:
+            - success
+          properties:
+            success:
+              type: boolean
+              example: true
+            failed_sessions:
+              type: array
+              items:
+                type: string
+              description: Sessions that failed to restore
+              example: ["sess_789"]
+
     # Path Types
     RecentPath:
       type: object
@@ -1311,6 +1895,57 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RecentPath'
+
+    # Slash Command Types
+    SlashCommand:
+      type: object
+      required:
+        - name
+        - source
+      properties:
+        name:
+          type: string
+          example: "/create_plan"
+          description: Command name including slash prefix
+        source:
+          type: string
+          enum: ["local", "global"]
+          description: Source of the command - local (repo) or global (user home)
+          example: "local"
+
+    SlashCommandsResponse:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SlashCommand'
+
+    # Agent Types
+    Agent:
+      type: object
+      required:
+        - name
+        - mentionText
+        - source
+      properties:
+        name:
+          type: string
+          description: Agent name from YAML frontmatter
+          example: "codebase-locator"
+        mentionText:
+          type: string
+          description: Text to use for mentions
+          example: "@agent-codebase-locator"
+        source:
+          type: string
+          enum: [local, global]
+          description: Whether agent is from local or global directory
+        description:
+          type: string
+          description: Optional description from YAML frontmatter
 
     UpdateConfigRequest:
       type: object
@@ -1671,3 +2306,7 @@ tags:
     description: Real-time event streaming
   - name: Proxy
     description: Model proxy endpoints for alternative providers
+  - name: Files
+    description: File system search and navigation
+  - name: Agents
+    description: Agent discovery and management

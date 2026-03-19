@@ -112,8 +112,8 @@ function getGitBranch(): string {
 }
 
 function extractIssueId(branchName: string): string | null {
-  // Match patterns like ENG-123, eng-123, etc.
-  const match = branchName.match(/[A-Za-z]+-\d+/);
+  // Match patterns like ENG-123, eng-123, B2BPROD-206, etc.
+  const match = branchName.match(/[A-Za-z0-9]+-\d+/);
   return match ? match[0].toUpperCase() : null;
 }
 
@@ -121,10 +121,10 @@ async function getIssueIdInteractively(defaultId: string | null = null): Promise
   const { issueId } = await inquirer.prompt({
     type: "input",
     name: "issueId",
-    message: "Enter Linear issue ID (e.g. ENG-123):",
+    message: "Enter Linear issue ID (e.g. ENG-123, B2BPROD-206):",
     default: defaultId,
     validate: (input) => {
-      return /^[A-Za-z]+-\d+$/i.test(input) ? true : "Please enter a valid issue ID (e.g. ENG-123)";
+      return /^[A-Za-z0-9]+-\d+$/i.test(input) ? true : "Please enter a valid issue ID (e.g. ENG-123, B2BPROD-206)";
     },
   });
   
@@ -133,7 +133,7 @@ async function getIssueIdInteractively(defaultId: string | null = null): Promise
 
 async function resolveIssueId(providedId?: string): Promise<string> {
   // If ID is provided as argument, use it
-  if (providedId && /^[A-Za-z]+-\d+$/i.test(providedId)) {
+  if (providedId && /^[A-Za-z0-9]+-\d+$/i.test(providedId)) {
     return providedId.toUpperCase();
   }
   
@@ -206,60 +206,99 @@ async function getIssue(issueId?: string) {
     if (!linear) {
       throw new Error("Linear client not initialized. Check your API key.");
     }
-    
+
     const resolvedId = await resolveIssueId(issueId);
     const issue = await linear.issue(resolvedId);
-    
+
     if (!issue) {
       console.error(chalk.red(`Issue ${resolvedId} not found.`));
       process.exit(1);
     }
-    
-    const comments = await issue.comments();
-    const assignee = await issue.assignee;
-    const state = await issue.state;
-    
-    // Format issue details with branch name in header
-    console.log(chalk.bold(`\n[${issue.identifier}] ${issue.title}`));
-    if (issue.branchName) {
-      console.log(chalk.dim(`Branch: ${issue.branchName}`));
+
+    // Display main issue
+    await displayIssue(issue);
+
+    // Fetch and display parent issues
+    const parentIssues = [];
+    let currentIssue = issue;
+
+    while (true) {
+      const parent = await currentIssue.parent;
+      if (!parent) break;
+
+      parentIssues.push(parent);
+      currentIssue = parent;
     }
-    console.log(chalk.dim(`Status: ${state?.name || "Unknown"}`));
-    
-    if (assignee) {
-      console.log(chalk.dim(`Assignee: ${assignee.name}`));
-    }
-    
-    if (issue.description) {
-      console.log(chalk.bold("\nDescription:"));
-      console.log(issue.description);
-    }
-    
-    // Format comments
-    if (comments.nodes.length > 0) {
-      console.log(chalk.bold("\nComments:"));
-      
-      // Reverse the comments array to show oldest first
-      const reversedComments = [...comments.nodes].reverse();
-      
-      for (const comment of reversedComments) {
-        const commentUser = await comment.user;
-        const commentDate = new Date(comment.createdAt);
-        const dateStr = commentDate.toISOString().split("T")[0];
-        const timeStr = commentDate.toTimeString().split(" ")[0]; // HH:MM:SS format
-        
-        console.log(chalk.dim(`[${dateStr} ${timeStr}] ${commentUser?.name || "Unknown"}:`));
-        console.log(comment.body);
-        console.log(); // Empty line between comments
+
+    // Display parent issues in reverse order (oldest parent first)
+    if (parentIssues.length > 0) {
+      console.log(chalk.bold.yellow("\n═══════════════════════════════════════════════════════════════"));
+      console.log(chalk.bold.yellow("PARENT ISSUES:"));
+      console.log(chalk.bold.yellow("═══════════════════════════════════════════════════════════════"));
+
+      for (let i = parentIssues.length - 1; i >= 0; i--) {
+        const levelPrefix = "  ".repeat(parentIssues.length - i - 1) + "↳ ";
+        console.log(chalk.yellow(`\n${levelPrefix}Parent Level ${parentIssues.length - i}:`));
+        await displayIssue(parentIssues[i], false);
       }
-    } else {
-      console.log(chalk.dim("\nNo comments on this issue."));
     }
-    
-    console.log(chalk.dim(`\nView in Linear: ${issue.url}`));
   } catch (error) {
     console.error(chalk.red("Error fetching issue:"), error instanceof Error ? error.message : String(error));
     process.exit(1);
+  }
+}
+
+async function displayIssue(issue: any, showLinearUrl: boolean = true) {
+  const comments = await issue.comments();
+  const assignee = await issue.assignee;
+  const state = await issue.state;
+
+  // Format issue details with branch name in header
+  console.log(chalk.bold(`\n[${issue.identifier}] ${issue.title}`));
+  if (issue.branchName) {
+    console.log(chalk.dim(`Branch: ${issue.branchName}`));
+  }
+  console.log(chalk.dim(`Status: ${state?.name || "Unknown"}`));
+
+  if (assignee) {
+    console.log(chalk.dim(`Assignee: ${assignee.name}`));
+  }
+
+  if (issue.description) {
+    console.log(chalk.bold("\nDescription:"));
+    console.log(issue.description);
+  }
+
+  // Format comments
+  if (comments.nodes.length > 0) {
+    console.log(chalk.bold("\nComments:"));
+
+    // Reverse the comments array to show oldest first
+    const reversedComments = [...comments.nodes].reverse();
+
+    for (const comment of reversedComments) {
+      let commentUser;
+      try {
+        commentUser = await comment.user;
+      } catch (error) {
+        // Handle case where user is null (bot comments, deleted users, etc.)
+        commentUser = null;
+      }
+
+      const commentDate = new Date(comment.createdAt);
+      const dateStr = commentDate.toISOString().split("T")[0];
+      const timeStr = commentDate.toTimeString().split(" ")[0]; // HH:MM:SS format
+
+      console.log(chalk.dim(`[${dateStr} ${timeStr}] ${commentUser?.name || "Unknown"}:`));
+      console.log(comment.body);
+      console.log(); // Empty line between comments
+    }
+  } else {
+    console.log(chalk.dim("\nNo comments on this issue."));
+  }
+
+  if (showLinearUrl) {
+    console.log(chalk.dim(`\nView in Linear: ${issue.url}`));
   }
 }
 
@@ -297,6 +336,171 @@ async function addComment(message: string, options: { issueId?: string }) {
   }
 }
 
+async function updateStatus(issueId: string, statusName: string): Promise<void> {
+  try {
+    if (!linear) {
+      throw new Error("Linear client not initialized. Check your API key.");
+    }
+
+    // Validate issue ID format
+    if (!issueId || !/^[A-Za-z0-9]+-\d+$/i.test(issueId)) {
+      console.error(chalk.red("Error: Invalid issue ID format. Expected format: ENG-123 or B2BPROD-206"));
+      process.exit(1);
+    }
+
+    const normalizedId = issueId.toUpperCase();
+
+    // First, fetch the issue to get its team
+    const issue = await linear.issue(normalizedId);
+
+    if (!issue) {
+      console.error(chalk.red(`Issue ${normalizedId} not found.`));
+      process.exit(1);
+    }
+
+    const team = await issue.team;
+    if (!team) {
+      console.error(chalk.red(`Could not determine team for issue ${normalizedId}.`));
+      process.exit(1);
+    }
+
+    // Fetch available states for the team
+    const states = await team.states();
+
+    // Find the state by name (case-insensitive)
+    const targetState = states.nodes.find(state =>
+      state.name.toLowerCase() === statusName.toLowerCase()
+    );
+
+    if (!targetState) {
+      console.error(chalk.red(`Status "${statusName}" not found for team ${team.name}.`));
+      console.log(chalk.yellow("\nAvailable statuses:"));
+      states.nodes.forEach(state => {
+        console.log(`  - ${state.name}`);
+      });
+      process.exit(1);
+    }
+
+    // Update the issue with the new state
+    const result = await linear.issueUpdate(normalizedId, {
+      stateId: targetState.id
+    });
+
+    if (result.success) {
+      console.log(chalk.green(`✓ Updated ${normalizedId} status to "${targetState.name}"`));
+    } else {
+      console.error(chalk.red(`Failed to update status for ${normalizedId}.`));
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error(chalk.red("Error updating status:"), error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+async function addLink(issueId: string, url: string, options: { title?: string }): Promise<void> {
+  try {
+    if (!linear) {
+      throw new Error("Linear client not initialized. Check your API key.");
+    }
+
+    // Validate issue ID format
+    if (!issueId || !/^[A-Za-z0-9]+-\d+$/i.test(issueId)) {
+      console.error(chalk.red("Error: Invalid issue ID format. Expected format: ENG-123 or B2BPROD-206"));
+      process.exit(1);
+    }
+
+    // Validate URL
+    if (!url) {
+      console.error(chalk.red("Error: URL is required"));
+      process.exit(1);
+    }
+
+    try {
+      new URL(url);
+    } catch {
+      console.error(chalk.red("Error: Invalid URL format"));
+      process.exit(1);
+    }
+
+    const normalizedId = issueId.toUpperCase();
+
+    // First, fetch the issue to verify it exists
+    const issue = await linear.issue(normalizedId);
+
+    if (!issue) {
+      console.error(chalk.red(`Issue ${normalizedId} not found.`));
+      process.exit(1);
+    }
+
+    // Create the attachment (link)
+    const result = await linear.attachmentCreate({
+      issueId: issue.id,
+      url: url,
+      title: options.title || url,
+    });
+
+    if (result.success) {
+      console.log(chalk.green(`✓ Added link to issue ${normalizedId}`));
+      if (options.title) {
+        console.log(chalk.dim(`  Title: ${options.title}`));
+      }
+      console.log(chalk.dim(`  URL: ${url}`));
+    } else {
+      console.error(chalk.red(`Failed to add link to ${normalizedId}.`));
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error(chalk.red("Error adding link:"), error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+async function assignToMe(issueId?: string): Promise<void> {
+  try {
+    if (!linear) {
+      throw new Error("Linear client not initialized. Check your API key.");
+    }
+
+    // Resolve issue ID (from argument, git branch, or interactive prompt)
+    const resolvedId = await resolveIssueId(issueId);
+
+    // Get the current authenticated user
+    const viewer = await linear.viewer;
+
+    if (!viewer) {
+      console.error(chalk.red("Error: Could not get authenticated user information."));
+      process.exit(1);
+    }
+
+    // Update the issue with the authenticated user as assignee
+    const result = await linear.issueUpdate(resolvedId, {
+      assigneeId: viewer.id
+    });
+
+    if (result.success) {
+      console.log(chalk.green(`✓ Assigned ${resolvedId} to ${viewer.name || viewer.email}`));
+
+      // Fetch and display the updated issue details
+      const updatedIssue = await linear.issue(resolvedId);
+      if (updatedIssue) {
+        const state = await updatedIssue.state;
+        console.log(chalk.dim(`  Status: ${state?.name || "Unknown"}`));
+        console.log(chalk.dim(`  Title: ${updatedIssue.title}`));
+        if (updatedIssue.url) {
+          console.log(chalk.dim(`  View in Linear: ${updatedIssue.url}`));
+        }
+      }
+    } else {
+      console.error(chalk.red(`Failed to assign ${resolvedId} to you.`));
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error(chalk.red("Error assigning issue:"), error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
 async function fetchImages(issueId: string): Promise<void> {
   try {
     // Re-initialize Linear client with signed URL headers to get JWT-signed URLs
@@ -308,8 +512,8 @@ async function fetchImages(issueId: string): Promise<void> {
     });
 
     // Validate issue ID format
-    if (!issueId || !/^[A-Za-z]+-\d+$/i.test(issueId)) {
-      console.error(chalk.red("Error: Invalid issue ID format. Expected format: ENG-123"));
+    if (!issueId || !/^[A-Za-z0-9]+-\d+$/i.test(issueId)) {
+      console.error(chalk.red("Error: Invalid issue ID format. Expected format: ENG-123 or B2BPROD-206"));
       process.exit(1);
     }
 
@@ -393,6 +597,511 @@ async function fetchImages(issueId: string): Promise<void> {
   }
 }
 
+async function getIssueV2(issueId: string, options: {
+  outputFormat?: string,
+  fields?: string
+}) {
+  try {
+    if (!linear) {
+      throw new Error("Linear client not initialized. Check your API key.");
+    }
+
+    // Validate issue ID format
+    if (!issueId || !/^[A-Za-z0-9]+-\d+$/i.test(issueId)) {
+      console.error(chalk.red("Error: Invalid issue ID format. Expected format: ENG-123 or B2BPROD-206"));
+      process.exit(1);
+    }
+
+    const normalizedId = issueId.toUpperCase();
+    const outputFormat = options.outputFormat || "json";
+    const useCompactJson = outputFormat === "json";
+    const usePrettyJson = outputFormat === "rich-json";
+
+    const requestedFields = options.fields
+      ? options.fields.split(',').map(f => f.trim())
+      : ["identifier", "title", "branch"];
+
+    // Fetch the issue
+    const issue = await linear.issue(normalizedId);
+
+    if (!issue) {
+      console.error(chalk.red(`Issue ${normalizedId} not found.`));
+      process.exit(1);
+    }
+
+    // Collect issue data based on requested fields
+    const issueData: any = {};
+
+    if (requestedFields.includes("identifier")) {
+      issueData.identifier = issue.identifier;
+    }
+
+    if (requestedFields.includes("title")) {
+      issueData.title = issue.title;
+    }
+
+    if (requestedFields.includes("branch")) {
+      issueData.branch = issue.branchName || null;
+    }
+
+    if (requestedFields.includes("description")) {
+      issueData.description = issue.description || null;
+    }
+
+    if (requestedFields.includes("assignee")) {
+      const assignee = await issue.assignee;
+      issueData.assignee = assignee?.name || null;
+    }
+
+    if (requestedFields.includes("comments")) {
+      const comments = await issue.comments();
+      issueData.comments = [];
+
+      for (const comment of comments.nodes) {
+        let commentUser;
+        try {
+          commentUser = await comment.user;
+        } catch (error) {
+          commentUser = null;
+        }
+
+        issueData.comments.push({
+          author: commentUser?.name || "Unknown",
+          body: comment.body,
+          createdAt: comment.createdAt
+        });
+      }
+    }
+
+    // Fetch parent issues if requested
+    if (requestedFields.includes("parents")) {
+      const parentIssues = [];
+      let currentIssue = issue;
+
+      while (true) {
+        const parent = await currentIssue.parent;
+        if (!parent) break;
+
+        const parentData: any = {
+          identifier: parent.identifier,
+          title: parent.title
+        };
+
+        // Fetch additional parent fields if needed
+        if (requestedFields.includes("description")) {
+          parentData.description = parent.description || null;
+        }
+
+        if (requestedFields.includes("assignee")) {
+          const parentAssignee = await parent.assignee;
+          parentData.assignee = parentAssignee?.name || null;
+        }
+
+        if (requestedFields.includes("comments")) {
+          const parentComments = await parent.comments();
+          parentData.comments = [];
+
+          for (const comment of parentComments.nodes) {
+            let commentUser;
+            try {
+              commentUser = await comment.user;
+            } catch (error) {
+              commentUser = null;
+            }
+
+            parentData.comments.push({
+              author: commentUser?.name || "Unknown",
+              body: comment.body,
+              createdAt: comment.createdAt
+            });
+          }
+        }
+
+        const parentState = await parent.state;
+        parentData._state = parentState?.name || "Unknown";
+
+        parentIssues.push(parentData);
+        currentIssue = parent;
+      }
+
+      if (parentIssues.length > 0) {
+        issueData.parents = parentIssues.reverse(); // Reverse to show oldest parent first
+      }
+    }
+
+    // Always fetch state and estimate for markdown format
+    const state = await issue.state;
+    const assignee = await issue.assignee;
+
+    issueData._state = state?.name || "Unknown";
+    issueData._estimate = issue.estimate || null;
+    issueData._assignee = assignee?.name || null;
+
+    // Output based on format
+    if (useCompactJson || usePrettyJson) {
+      // For JSON, remove the internal fields and output clean JSON
+      const cleanedData: any = {};
+      for (const key of Object.keys(issueData)) {
+        if (!key.startsWith('_')) {
+          cleanedData[key] = issueData[key];
+        }
+      }
+      console.log(JSON.stringify(cleanedData, null, usePrettyJson ? 2 : undefined));
+    } else {
+      // Markdown format
+      if (requestedFields.includes("identifier") && requestedFields.includes("title")) {
+        console.log(`[${chalk.cyan(issueData.identifier)}] ${issueData.title}`);
+      } else if (requestedFields.includes("identifier")) {
+        console.log(`[${chalk.cyan(issueData.identifier)}]`);
+      } else if (requestedFields.includes("title")) {
+        console.log(issueData.title);
+      }
+
+      console.log(chalk.dim(`Status: ${issueData._state}`));
+
+      if (issueData._estimate) {
+        console.log(chalk.dim(`Size: ${issueData._estimate}`));
+      }
+
+      if (requestedFields.includes("assignee") && issueData.assignee) {
+        console.log(chalk.dim(`Assignee: ${issueData.assignee}`));
+      } else if (issueData._assignee) {
+        console.log(chalk.dim(`Assignee: ${issueData._assignee}`));
+      }
+
+      if (requestedFields.includes("branch") && issueData.branch) {
+        console.log(chalk.dim(`Branch: ${issueData.branch}`));
+      }
+
+      if (requestedFields.includes("description") && issueData.description) {
+        console.log(chalk.bold("\nDescription:"));
+        console.log(issueData.description);
+      }
+
+      if (requestedFields.includes("comments") && issueData.comments && issueData.comments.length > 0) {
+        console.log(chalk.bold("\nComments:"));
+        for (const comment of issueData.comments) {
+          const commentDate = new Date(comment.createdAt);
+          const dateStr = commentDate.toISOString().split("T")[0];
+          const timeStr = commentDate.toTimeString().split(" ")[0];
+          console.log(chalk.dim(`[${dateStr} ${timeStr}] ${comment.author}:`));
+          console.log(comment.body);
+          console.log("");
+        }
+      }
+
+      // Display parent issues if requested
+      if (requestedFields.includes("parents") && issueData.parents && issueData.parents.length > 0) {
+        console.log(chalk.bold.yellow("\n═══════════════════════════════════════════════════════════════"));
+        console.log(chalk.bold.yellow("PARENT ISSUES:"));
+        console.log(chalk.bold.yellow("═══════════════════════════════════════════════════════════════"));
+
+        for (let i = 0; i < issueData.parents.length; i++) {
+          const parent = issueData.parents[i];
+          const levelPrefix = "  ".repeat(i) + "↳ ";
+          console.log(chalk.yellow(`\n${levelPrefix}Parent Level ${i + 1}:`));
+
+          console.log(chalk.bold(`\n${levelPrefix}[${parent.identifier}] ${parent.title}`));
+          console.log(chalk.dim(`${levelPrefix}Status: ${parent._state}`));
+
+          if (requestedFields.includes("assignee") && parent.assignee) {
+            console.log(chalk.dim(`${levelPrefix}Assignee: ${parent.assignee}`));
+          }
+
+          if (requestedFields.includes("description") && parent.description) {
+            console.log(chalk.bold(`\n${levelPrefix}Description:`));
+            const descLines = parent.description.split('\n');
+            for (const line of descLines) {
+              console.log(`${levelPrefix}${line}`);
+            }
+          }
+
+          if (requestedFields.includes("comments") && parent.comments && parent.comments.length > 0) {
+            console.log(chalk.bold(`\n${levelPrefix}Comments:`));
+            for (const comment of parent.comments) {
+              const commentDate = new Date(comment.createdAt);
+              const dateStr = commentDate.toISOString().split("T")[0];
+              const timeStr = commentDate.toTimeString().split(" ")[0];
+              console.log(chalk.dim(`${levelPrefix}[${dateStr} ${timeStr}] ${comment.author}:`));
+              const commentLines = comment.body.split('\n');
+              for (const line of commentLines) {
+                console.log(`${levelPrefix}${line}`);
+              }
+              console.log("");
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error(chalk.red("Error fetching issue:"), error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+async function listIssuesV2(options: {
+  maxIssues?: string,
+  status?: string,
+  size?: string,
+  assignee?: string,
+  sortAsc?: boolean,
+  outputFormat?: string,
+  fields?: string,
+  idsOnly?: boolean
+}) {
+  try {
+    if (!linear) {
+      throw new Error("Linear client not initialized. Check your API key.");
+    }
+
+    const limit = parseInt(options.maxIssues || "10", 10);
+    const outputFormat = options.outputFormat || "markdown";
+    const idsOnly = options.idsOnly || false;
+    const useCompactJson = outputFormat === "json";
+    const usePrettyJson = outputFormat === "rich-json";
+
+    // Check if --fields was explicitly provided by user (not just the default)
+    // We detect this by checking if the value differs from the default
+    const defaultFields = "identifier,title,branch";
+    const fieldsExplicitlyProvided = options.fields && options.fields !== defaultFields;
+
+    // Validate mutually exclusive options
+    if (idsOnly && fieldsExplicitlyProvided) {
+      console.error(chalk.red("Error: --ids-only and --fields cannot be used together"));
+      process.exit(1);
+    }
+
+    const requestedFields = idsOnly
+      ? ["identifier"]
+      : options.fields
+        ? options.fields.split(',').map(f => f.trim())
+        : ["identifier", "title", "branch"];
+
+    // Build filter conditions
+    const filterConditions: any[] = [];
+
+    // Handle assignee filter
+    if (options.assignee) {
+      const assigneeValue = options.assignee.trim();
+
+      // Fetch all users to find the matching one
+      const users = await linear.users();
+      const matchingUser = users.nodes.find(user =>
+        user.name.toLowerCase() === assigneeValue.toLowerCase() ||
+        user.email.toLowerCase() === assigneeValue.toLowerCase() ||
+        user.displayName.toLowerCase() === assigneeValue.toLowerCase()
+      );
+
+      if (!matchingUser) {
+        console.error(chalk.red(`Error: No user found matching "${assigneeValue}"`));
+        process.exit(1);
+      }
+
+      filterConditions.push({
+        assignee: { id: { eq: matchingUser.id } }
+      });
+    }
+
+    // Handle status filter (comma-separated values)
+    if (options.status) {
+      const statuses = options.status.split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
+      if (statuses.length === 1) {
+        filterConditions.push({
+          state: { name: { eq: statuses[0] } }
+        });
+      } else {
+        filterConditions.push({
+          or: statuses.map(status => ({
+            state: { name: { eq: status } }
+          }))
+        });
+      }
+    }
+
+    // Handle issue size filter (comma-separated numbers)
+    if (options.size) {
+      const sizes = options.size.split(',').map(s => parseInt(s.trim(), 10));
+      if (sizes.length === 1) {
+        filterConditions.push({
+          estimate: { eq: sizes[0] }
+        });
+      } else {
+        filterConditions.push({
+          or: sizes.map(size => ({
+            estimate: { eq: size }
+          }))
+        });
+      }
+    }
+
+    // Construct the final filter
+    const filter = filterConditions.length > 0
+      ? { and: filterConditions }
+      : undefined;
+
+    // Fetch issues with sorting
+    const queryOptions: any = {
+      first: limit,
+      filter,
+    };
+
+    if (options.sortAsc) {
+      queryOptions.orderBy = "updatedAt";
+    }
+
+    const result = await linear.issues(queryOptions);
+
+    if (!result.nodes.length) {
+      if (useCompactJson || usePrettyJson) {
+        console.log(JSON.stringify([], null, usePrettyJson ? 2 : undefined));
+      } else {
+        console.log(chalk.yellow("No issues found matching the criteria."));
+      }
+      return;
+    }
+
+    // Handle ids-only mode
+    if (idsOnly) {
+      const ids = result.nodes.map(issue => issue.identifier);
+      if (useCompactJson || usePrettyJson) {
+        console.log(JSON.stringify(ids, null, usePrettyJson ? 2 : undefined));
+      } else {
+        // Markdown/plain format - one ID per line
+        ids.forEach(id => console.log(id));
+      }
+      return;
+    }
+
+    // Collect all issue data
+    const issuesData = [];
+    for (const issue of result.nodes) {
+      const issueData: any = {};
+
+      if (requestedFields.includes("identifier")) {
+        issueData.identifier = issue.identifier;
+      }
+
+      if (requestedFields.includes("title")) {
+        issueData.title = issue.title;
+      }
+
+      if (requestedFields.includes("branch")) {
+        issueData.branch = issue.branchName || null;
+      }
+
+      if (requestedFields.includes("description")) {
+        issueData.description = issue.description || null;
+      }
+
+      if (requestedFields.includes("assignee")) {
+        const assignee = await issue.assignee;
+        issueData.assignee = assignee?.name || null;
+      }
+
+      if (requestedFields.includes("comments")) {
+        const comments = await issue.comments();
+        issueData.comments = [];
+
+        for (const comment of comments.nodes) {
+          let commentUser;
+          try {
+            commentUser = await comment.user;
+          } catch (error) {
+            commentUser = null;
+          }
+
+          issueData.comments.push({
+            author: commentUser?.name || "Unknown",
+            body: comment.body,
+            createdAt: comment.createdAt
+          });
+        }
+      }
+
+      // Always fetch state and assignee for markdown format
+      const state = await issue.state;
+      const assignee = await issue.assignee;
+
+      issueData._state = state?.name || "Unknown";
+      issueData._estimate = issue.estimate || null;
+      issueData._assignee = assignee?.name || null;
+
+      issuesData.push(issueData);
+    }
+
+    // Output based on format
+    if (useCompactJson || usePrettyJson) {
+      // For JSON, remove the internal fields and output clean JSON
+      const cleanedData = issuesData.map(issue => {
+        const cleaned: any = {};
+        for (const key of Object.keys(issue)) {
+          if (!key.startsWith('_')) {
+            cleaned[key] = issue[key];
+          }
+        }
+        return cleaned;
+      });
+      console.log(JSON.stringify(cleanedData, null, usePrettyJson ? 2 : undefined));
+    } else {
+      // Markdown format
+      console.log(chalk.bold(`\nFound ${issuesData.length} issue${issuesData.length > 1 ? 's' : ''}:`));
+
+      for (const issue of issuesData) {
+        console.log("");
+
+        if (requestedFields.includes("identifier") && requestedFields.includes("title")) {
+          console.log(`[${chalk.cyan(issue.identifier)}] ${issue.title}`);
+        } else if (requestedFields.includes("identifier")) {
+          console.log(`[${chalk.cyan(issue.identifier)}]`);
+        } else if (requestedFields.includes("title")) {
+          console.log(issue.title);
+        }
+
+        console.log(chalk.dim(`  Status: ${issue._state}`));
+
+        if (issue._estimate) {
+          console.log(chalk.dim(`  Size: ${issue._estimate}`));
+        }
+
+        if (requestedFields.includes("assignee") && issue.assignee) {
+          console.log(chalk.dim(`  Assignee: ${issue.assignee}`));
+        } else if (issue._assignee) {
+          console.log(chalk.dim(`  Assignee: ${issue._assignee}`));
+        }
+
+        if (requestedFields.includes("branch") && issue.branch) {
+          console.log(chalk.dim(`  Branch: ${issue.branch}`));
+        }
+
+        if (requestedFields.includes("description") && issue.description) {
+          console.log(chalk.bold("\n  Description:"));
+          console.log("  " + issue.description.split('\n').join('\n  '));
+        }
+
+        if (requestedFields.includes("comments") && issue.comments && issue.comments.length > 0) {
+          console.log(chalk.bold("\n  Comments:"));
+          for (const comment of issue.comments) {
+            const commentDate = new Date(comment.createdAt);
+            const dateStr = commentDate.toISOString().split("T")[0];
+            const timeStr = commentDate.toTimeString().split(" ")[0];
+            console.log(chalk.dim(`  [${dateStr} ${timeStr}] ${comment.author}:`));
+            console.log("  " + comment.body.split('\n').join('\n  '));
+            console.log("");
+          }
+        }
+      }
+
+      // Show pagination info if there are more issues
+      if (result.pageInfo.hasNextPage) {
+        console.log(chalk.dim(`\nShowing first ${limit} issues. There may be more issues available.`));
+      }
+    }
+  } catch (error) {
+    console.error(chalk.red("Error fetching issues:"), error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
 // Set up CLI commands
 const program = new Command();
 
@@ -404,7 +1113,7 @@ program
   .showHelpAfterError();
 
 program
-  .command("list-issues")
+  .command("my-issues")
   .description("List your assigned issues")
   .action(listIssues);
 
@@ -412,6 +1121,13 @@ program
   .command("get-issue [id]")
   .description("Show issue details and comments (ID optional if in git branch)")
   .action(getIssue);
+
+program
+  .command("get-issue-v2 <id>")
+  .description("Get a single issue with the same output format and field options as list-issues")
+  .option("--output-format <format>", "Output format: markdown, json (compact), or rich-json (pretty)", "json")
+  .option("--fields <fields>", "Comma-separated fields to include: identifier,title,branch,assignee,description,comments,parents", "identifier,title,branch")
+  .action(getIssueV2);
 
 program
   .command("add-comment <message>")
@@ -424,6 +1140,35 @@ program
   .description("Download all images from a Linear issue to thoughts/shared/images/")
   .action(fetchImages);
 
+program
+  .command("update-status <id> <status>")
+  .description("Update the status of a Linear issue (e.g. 'research needed', 'in review')")
+  .action(updateStatus);
+
+program
+  .command("add-link <id> <url>")
+  .description("Add a link/attachment to a Linear issue")
+  .option("-t, --title <title>", "Optional title for the link (defaults to URL)")
+  .action(addLink);
+
+program
+  .command("assign-to-me [id]")
+  .description("Assign an issue to yourself (ID optional if in git branch)")
+  .action(assignToMe);
+
+program
+  .command("list-issues")
+  .description("List and filter issues with advanced options")
+  .option("--max-issues <number>", "Maximum number of issues to fetch", "10")
+  .option("--assignee <assignee>", "Filter by assignee (name, email, or display name)")
+  .option("--status <statuses>", "Filter by status (comma-separated, e.g. 'research needed,in review')")
+  .option("--size <sizes>", "Filter by issue size (comma-separated numbers, e.g. '1,2')")
+  .option("--sort-asc", "Sort by updatedAt in ascending order (default is descending)")
+  .option("--output-format <format>", "Output format: markdown, json (compact), or rich-json (pretty)", "markdown")
+  .option("--fields <fields>", "Comma-separated fields to include: identifier,title,branch,assignee,description,comments", "identifier,title,branch")
+  .option("--ids-only", "Output only issue identifiers (incompatible with --fields)")
+  .action(listIssuesV2);
+
 // Add completion generation
 program
   .command("completion")
@@ -432,7 +1177,7 @@ program
   .option("--zsh", "Generate Zsh completion script")
   .option("--fish", "Generate Fish completion script")
   .action((options) => {
-    const commands = ["list-issues", "get-issue", "add-comment", "fetch-images", "completion", "help"];
+    const commands = ["my-issues", "list-issues", "get-issue", "get-issue-v2", "add-comment", "fetch-images", "update-status", "add-link", "assign-to-me", "completion", "help"];
 
     if (options.bash) {
       // Basic bash completion
@@ -463,10 +1208,15 @@ complete -F _linear_completions linear`);
 _linear() {
   local -a commands
   commands=(
-    'list-issues:List your assigned issues'
+    'my-issues:List your assigned issues'
+    'list-issues:List and filter issues with advanced options'
     'get-issue:Show issue details and comments'
+    'get-issue-v2:Get a single issue with the same output format as list-issues'
     'add-comment:Add a comment to an issue'
     'fetch-images:Download all images from an issue'
+    'update-status:Update the status of a Linear issue'
+    'add-link:Add a link/attachment to a Linear issue'
+    'assign-to-me:Assign an issue to yourself'
     'completion:Generate shell completion script'
     'help:Display help for command'
   )
@@ -480,6 +1230,27 @@ _linear() {
           '-i[Specify the Linear issue ID manually]' \\
           '--issue-id[Specify the Linear issue ID manually]'
         ;;
+      add-link)
+        _arguments \\
+          '-t[Optional title for the link]:title:' \\
+          '--title[Optional title for the link]:title:'
+        ;;
+      get-issue-v2)
+        _arguments \\
+          '--output-format[Output format]:format:(markdown json rich-json)' \\
+          '--fields[Fields to include]:fields:'
+        ;;
+      list-issues)
+        _arguments \\
+          '--max-issues[Maximum number of issues to fetch]:number:' \\
+          '--assignee[Filter by assignee]:assignee:' \\
+          '--status[Filter by status]:statuses:' \\
+          '--size[Filter by issue size]:sizes:' \\
+          '--sort-asc[Sort by updatedAt in ascending order]' \\
+          '--output-format[Output format]:format:(markdown json rich-json)' \\
+          '--fields[Fields to include]:fields:' \\
+          '--ids-only[Output only issue identifiers]'
+        ;;
     esac
   fi
 }
@@ -492,15 +1263,37 @@ _linear`);
 complete -c linear -f
 
 # Commands
-complete -c linear -n "__fish_use_subcommand" -a "list-issues" -d "List your assigned issues"
+complete -c linear -n "__fish_use_subcommand" -a "my-issues" -d "List your assigned issues"
+complete -c linear -n "__fish_use_subcommand" -a "list-issues" -d "List and filter issues with advanced options"
 complete -c linear -n "__fish_use_subcommand" -a "get-issue" -d "Show issue details and comments"
+complete -c linear -n "__fish_use_subcommand" -a "get-issue-v2" -d "Get a single issue with the same output format as list-issues"
 complete -c linear -n "__fish_use_subcommand" -a "add-comment" -d "Add a comment to an issue"
 complete -c linear -n "__fish_use_subcommand" -a "fetch-images" -d "Download all images from an issue"
+complete -c linear -n "__fish_use_subcommand" -a "update-status" -d "Update the status of a Linear issue"
+complete -c linear -n "__fish_use_subcommand" -a "add-link" -d "Add a link/attachment to a Linear issue"
+complete -c linear -n "__fish_use_subcommand" -a "assign-to-me" -d "Assign an issue to yourself"
 complete -c linear -n "__fish_use_subcommand" -a "completion" -d "Generate shell completion script"
 complete -c linear -n "__fish_use_subcommand" -a "help" -d "Display help for command"
 
 # Options for add-comment
 complete -c linear -n "__fish_seen_subcommand_from add-comment" -s i -l issue-id -d "Specify the Linear issue ID manually"
+
+# Options for add-link
+complete -c linear -n "__fish_seen_subcommand_from add-link" -s t -l title -d "Optional title for the link"
+
+# Options for get-issue-v2
+complete -c linear -n "__fish_seen_subcommand_from get-issue-v2" -l output-format -d "Output format" -a "markdown json rich-json"
+complete -c linear -n "__fish_seen_subcommand_from get-issue-v2" -l fields -d "Fields to include (comma-separated)"
+
+# Options for list-issues
+complete -c linear -n "__fish_seen_subcommand_from list-issues" -l max-issues -d "Maximum number of issues to fetch"
+complete -c linear -n "__fish_seen_subcommand_from list-issues" -l assignee -d "Filter by assignee (name, email, or display name)"
+complete -c linear -n "__fish_seen_subcommand_from list-issues" -l status -d "Filter by status (comma-separated)"
+complete -c linear -n "__fish_seen_subcommand_from list-issues" -l size -d "Filter by issue size (comma-separated)"
+complete -c linear -n "__fish_seen_subcommand_from list-issues" -l sort-asc -d "Sort by updatedAt in ascending order"
+complete -c linear -n "__fish_seen_subcommand_from list-issues" -l output-format -d "Output format" -a "markdown json rich-json"
+complete -c linear -n "__fish_seen_subcommand_from list-issues" -l fields -d "Fields to include (comma-separated)"
+complete -c linear -n "__fish_seen_subcommand_from list-issues" -l ids-only -d "Output only issue identifiers"
 
 # Options for completion
 complete -c linear -n "__fish_seen_subcommand_from completion" -l bash -d "Generate Bash completion script"

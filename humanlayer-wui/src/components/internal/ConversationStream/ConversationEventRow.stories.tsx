@@ -98,6 +98,39 @@ export const AssistantMessage: Story = {
   },
 }
 
+export const AssistantMessageWithLongCodeBlocks: Story = {
+  args: {
+    event: {
+      ...baseAssistantEvent,
+      id: 10,
+      sequence: 2,
+      content: `\`\`\`
+Thisisaverylongmessagethatwillneverendnomatterhowhardyoutryitremainsthelongestlineintheworldandwilljustgoonandonandonandonuntileitherthiscomputerimplodesarethissolarsystemreachesitsinevitablesundeath
+\`\`\`
+
+and
+
+\`\`\`
+"This is a very long message that will never end no matter how hard you try it remains the longest line in teh world and will go on and on and on and on and on likely until the sun explodes but we all know that won't be for a very long time probably but anyway how do we feel about chickens"
+\`\`\``,
+      createdAt: new Date('2025-10-02T20:05:14Z'),
+    },
+    shouldIgnoreMouseEvent: () => false,
+    setFocusedEventId: () => {},
+    setFocusSource: () => {},
+    isFocused: false,
+    isLast: true,
+    responseEditorIsFocused: false,
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: 'Assistant message with long code blocks to test word wrapping behavior',
+      },
+    },
+  },
+}
+
 // Bash Tool - shows background job feature
 export const BashToolCall: Story = {
   args: {
@@ -116,6 +149,45 @@ export const BashToolCall: Story = {
       toolName: 'Bash',
       toolInputJson: JSON.stringify({
         command: 'npm run dev',
+        description: 'Start development server',
+        run_in_background: true,
+      }),
+    },
+    shouldIgnoreMouseEvent: () => false,
+    setFocusedEventId: () => {},
+    setFocusSource: () => {},
+    isFocused: false,
+    isLast: true,
+    responseEditorIsFocused: false,
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: 'Bash tool call with background job execution option',
+      },
+    },
+  },
+}
+
+// Bash Tool - shows background job feature
+export const BashToolCallLongCommand: Story = {
+  args: {
+    event: {
+      approvalId: 'approval-123',
+      approvalStatus: 'pending' as const,
+      claudeSessionId: 'a3751d3f-c6c5-402b-a7c6-a6fdfeaf6cd9',
+      content: undefined,
+      createdAt: new Date('2025-09-18T18:44:48Z'),
+      eventType: 'tool_call' as const,
+      id: 3,
+      isCompleted: false,
+      role: 'assistant' as const,
+      sequence: 3,
+      sessionId: '08f00f98-d110-40e1-8d0b-fdec7f594f18',
+      toolName: 'Bash',
+      toolInputJson: JSON.stringify({
+        command:
+          'humanlayer-nightly launch --model opus --dangerously-skip-permissions --title "implement ENG-2090" -w ~/wt/humanlayer/ENG-2090 "/implement_plan and when you are done implementing and all tests pass high five your friends"',
         description: 'Start development server',
         run_in_background: true,
       }),
@@ -870,6 +942,7 @@ export const MCPLinearToolCall: Story = {
 
 // MCP GitHub Tool - shows completed GitHub API call
 export const MCPGitHubToolCall: Story = {
+  name: 'MCP GitHub Tool Call',
   args: {
     event: {
       approvalId: 'approval-mcp-2',
@@ -925,15 +998,8 @@ export const MCPGenericToolCall: Story = {
       sequence: 20,
       sessionId: '08f00f98-d110-40e1-8d0b-fdec7f594f18',
       toolName: 'mcp__custom_service__complex_method_name',
-      toolInputJson: JSON.stringify({
-        complexParam: {
-          nested: {
-            values: [1, 2, 3],
-          },
-        },
-        simpleParam: 'test-value',
-        anotherParam: 42,
-      }),
+      toolInputJson:
+        '{"complexParam":{"test": "abc","nested":{"values":[1,2,3]}},"simpleParam":"test-value","anotherParam":42, "arr": [], "arr2": [1, 2, 3]}',
     },
     shouldIgnoreMouseEvent: () => false,
     setFocusedEventId: () => {},
@@ -978,6 +1044,248 @@ export const UserMessageWithCodeBlock: Story = {
     docs: {
       description: {
         story: 'User message containing a JavaScript code block with syntax highlighting',
+      },
+    },
+  },
+}
+
+// MCP Linear list_issues - shows Linear tickets listing
+export const MCPLinearListIssuesToolCall: Story = {
+  args: {
+    event: {
+      approvalId: 'approval-mcp-linear-1',
+      approvalStatus: 'approved' as const,
+      claudeSessionId: 'a3751d3f-c6c5-402b-a7c6-a6fdfeaf6cd9',
+      content: undefined,
+      createdAt: new Date('2025-10-01T15:09:00Z'),
+      eventType: 'tool_call' as const,
+      id: 21,
+      isCompleted: true,
+      role: 'assistant' as const,
+      sequence: 21,
+      sessionId: '08f00f98-d110-40e1-8d0b-fdec7f594f18',
+      toolName: 'mcp__linear__list_issues',
+      toolInputJson: JSON.stringify({
+        limit: 10,
+        includeArchived: false,
+      }),
+      toolResultContent: `Found 8 issues:
+
+1. **ENG-2219** - Add MCP tool event content storybook story
+   Status: In Progress | Priority: High
+   Assignee: @nyx | Updated: 2025-10-01
+   https://linear.app/humanlayer/issue/ENG-2219
+
+2. **ENG-2218** - Improve welcome message on first use
+   Status: Done | Priority: Medium
+   Assignee: @dexter | Updated: 2025-09-30
+   https://linear.app/humanlayer/issue/ENG-2218
+
+3. **ENG-2123** - Consolidate session launch modal with SessionDetail view
+   Status: Done | Priority: High
+   Assignee: @sundeep | Updated: 2025-09-29
+   https://linear.app/humanlayer/issue/ENG-2123
+
+4. **ENG-2120** - Fix conversation stream rendering performance
+   Status: In Progress | Priority: High
+   Assignee: @nyx | Updated: 2025-09-28
+   https://linear.app/humanlayer/issue/ENG-2120
+
+5. **ENG-1753** - Add Linear image attachment support
+   Status: In Review | Priority: Medium
+   Assignee: @allison | Updated: 2025-09-24
+   https://linear.app/humanlayer/issue/ENG-1753
+
+6. **ENG-1646** - Explore Linear API integration options
+   Status: Done | Priority: Low
+   Assignee: @allison | Updated: 2025-09-20
+   https://linear.app/humanlayer/issue/ENG-1646
+
+7. **ENG-1411** - Research Linear MCP server capabilities
+   Status: Done | Priority: Medium
+   Assignee: @allison | Updated: 2025-09-15
+   https://linear.app/humanlayer/issue/ENG-1411
+
+8. **ENG-2100** - Implement dark mode for WUI
+   Status: Todo | Priority: Low
+   Assignee: Unassigned | Updated: 2025-09-10
+   https://linear.app/humanlayer/issue/ENG-2100`,
+    },
+    shouldIgnoreMouseEvent: () => false,
+    setFocusedEventId: () => {},
+    setFocusSource: () => {},
+    isFocused: false,
+    isLast: true,
+    responseEditorIsFocused: false,
+  },
+  parameters: {
+    docs: {
+      description: {
+        story:
+          'MCP Linear integration showing list of issues with status, priority, and assignee details',
+      },
+    },
+  },
+}
+
+// BashOutput Tool - shows successful background job output
+export const BashOutputToolCallSuccess: Story = {
+  args: {
+    event: {
+      approvalId: undefined,
+      approvalStatus: undefined,
+      claudeSessionId: 'a3751d3f-c6c5-402b-a7c6-a6fdfeaf6cd9',
+      content: undefined,
+      createdAt: new Date('2025-10-08T18:50:08Z'),
+      eventType: 'tool_call' as const,
+      id: 22,
+      isCompleted: true,
+      role: 'assistant' as const,
+      sequence: 22,
+      sessionId: '08f00f98-d110-40e1-8d0b-fdec7f594f18',
+      toolName: 'BashOutput',
+      toolInputJson: JSON.stringify({
+        bash_id: '01dfa1',
+      }),
+    },
+    toolResult: {
+      approvalId: undefined,
+      approvalStatus: undefined,
+      claudeSessionId: 'a3751d3f-c6c5-402b-a7c6-a6fdfeaf6cd9',
+      content: undefined,
+      createdAt: new Date('2025-10-08T18:50:09Z'),
+      eventType: 'tool_result' as const,
+      id: 23,
+      isCompleted: true,
+      role: 'user' as const,
+      sequence: 23,
+      sessionId: '08f00f98-d110-40e1-8d0b-fdec7f594f18',
+      toolResultContent: `<status>completed</status>
+
+<exit_code>0</exit_code>
+
+<stdout>
+hey
+</stdout>
+
+<timestamp>2025-10-08T18:50:08.532Z</timestamp>`,
+    },
+    shouldIgnoreMouseEvent: () => false,
+    setFocusedEventId: () => {},
+    setFocusSource: () => {},
+    isFocused: false,
+    isLast: true,
+    responseEditorIsFocused: false,
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: 'BashOutput tool showing successful background job completion with stdout',
+      },
+    },
+  },
+}
+
+// BashOutput Tool - shows failed background job output
+export const BashOutputToolCallFailure: Story = {
+  args: {
+    event: {
+      approvalId: undefined,
+      approvalStatus: undefined,
+      claudeSessionId: 'a3751d3f-c6c5-402b-a7c6-a6fdfeaf6cd9',
+      content: undefined,
+      createdAt: new Date('2025-10-08T18:51:08Z'),
+      eventType: 'tool_call' as const,
+      id: 24,
+      isCompleted: true,
+      role: 'assistant' as const,
+      sequence: 24,
+      sessionId: '08f00f98-d110-40e1-8d0b-fdec7f594f18',
+      toolName: 'BashOutput',
+      toolInputJson: JSON.stringify({
+        bash_id: 'c148de',
+      }),
+    },
+    toolResult: {
+      approvalId: undefined,
+      approvalStatus: undefined,
+      claudeSessionId: 'a3751d3f-c6c5-402b-a7c6-a6fdfeaf6cd9',
+      content: undefined,
+      createdAt: new Date('2025-10-08T18:51:09Z'),
+      eventType: 'tool_result' as const,
+      id: 25,
+      isCompleted: true,
+      role: 'user' as const,
+      sequence: 25,
+      sessionId: '08f00f98-d110-40e1-8d0b-fdec7f594f18',
+      toolResultContent: `<status>failed</status>
+
+<exit_code>2</exit_code>
+
+<stderr>
+ls: cannot access '/this/directory/does/not/exist': No such file or directory
+</stderr>
+
+<timestamp>2025-10-08T18:51:08.049Z</timestamp>`,
+    },
+    shouldIgnoreMouseEvent: () => false,
+    setFocusedEventId: () => {},
+    setFocusSource: () => {},
+    isFocused: false,
+    isLast: true,
+    responseEditorIsFocused: false,
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: 'BashOutput tool showing failed background job with stderr and exit code',
+      },
+    },
+  },
+}
+
+// Error Boundary Demo - shows error boundary with compact inline fallback UI
+export const ErrorBoundaryDemo: Story = {
+  args: {} as any,
+  render: () => {
+    // Create an event that throws when the component tries to access properties during render
+    const brokenEvent = new Proxy(
+      {
+        id: 1,
+        sessionId: 'test-session',
+        claudeSessionId: 'test-claude-session',
+        sequence: 1,
+        createdAt: new Date(),
+        isCompleted: false,
+      },
+      {
+        get(target, prop) {
+          // Throw error when component tries to access eventType during render
+          if (prop === 'eventType') {
+            throw new Error('Test error: ConversationEventRow rendering failed')
+          }
+          return (target as any)[prop]
+        },
+      },
+    ) as ConversationEvent
+
+    return (
+      <ConversationEventRow
+        event={brokenEvent}
+        shouldIgnoreMouseEvent={() => false}
+        setFocusedEventId={() => {}}
+        setFocusSource={() => {}}
+        isFocused={false}
+        isLast={true}
+        responseEditorIsFocused={false}
+      />
+    )
+  },
+  parameters: {
+    docs: {
+      description: {
+        story:
+          'Demonstrates error boundary behavior by using a Proxy that throws when the component accesses properties during render. Shows the compact "response-editor" variant fallback UI with refresh functionality.',
       },
     },
   },

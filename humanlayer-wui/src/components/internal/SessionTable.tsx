@@ -3,16 +3,22 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip'
 import { useHotkeys } from 'react-hotkeys-hook'
 import { useEffect, useRef, useState } from 'react'
-import { CircleOff, CheckSquare, Square, FileText, Pencil, ShieldOff } from 'lucide-react'
+import { CircleOff, CheckSquare, Square, Pencil, ShieldOff } from 'lucide-react'
+import { SentryErrorBoundary } from '@/components/ErrorBoundary'
 import { getStatusTextClass } from '@/utils/component-utils'
-import { formatTimestamp, formatAbsoluteTimestamp } from '@/utils/formatting'
+import { usePostHogTracking } from '@/hooks/usePostHogTracking'
+import { POSTHOG_EVENTS } from '@/lib/telemetry/events'
+import {
+  formatTimestamp,
+  formatAbsoluteTimestamp,
+  truncate,
+  extractTextFromEditorState,
+} from '@/utils/formatting'
 import { highlightMatches } from '@/lib/fuzzy-search'
-import { useSessionLauncher } from '@/hooks/useSessionLauncher'
 import { cn } from '@/lib/utils'
 import { useStore } from '@/AppStore'
+import { useSessionLauncher } from '@/hooks/useSessionLauncher'
 import { toast } from 'sonner'
-import { EmptyState } from './EmptyState'
-import type { LucideIcon } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { daemonClient } from '@/lib/daemon/client'
@@ -20,6 +26,10 @@ import { renderSessionStatus } from '@/utils/sessionStatus'
 import { logger } from '@/lib/logging'
 import { HOTKEY_SCOPES } from '@/hooks/hotkeys/scopes'
 import { HotkeyScopeBoundary } from '../HotkeyScopeBoundary'
+import { SessionsEmptyState } from './SessionsEmptyState'
+import { ArchivedSessionsEmptyState } from './ArchivedSessionsEmptyState'
+import { showUndoToast } from '@/utils/undoToast'
+import { TOAST_IDS } from '@/constants/toastIds'
 
 interface SessionTableProps {
   sessions: Session[]
@@ -31,19 +41,13 @@ interface SessionTableProps {
   focusedSession: Session | null
   searchText?: string
   matchedSessions?: Map<string, any>
-  archived?: boolean // Add this to indicate if showing archived sessions
-  emptyState?: {
-    icon?: LucideIcon
-    title: string
-    message?: string
-    action?: {
-      label: string
-      onClick: () => void
-    }
-  }
+  isArchivedView?: boolean // Add this to indicate if showing archived sessions
+  isDraftsView?: boolean // Add this to indicate if showing drafts view
+  onNavigateToSessions?: () => void // For archived view navigation
+  onBypassPermissions?: (sessionIds: string[]) => void
 }
 
-export default function SessionTable({
+function SessionTableInner({
   sessions,
   handleFocusSession,
   handleBlurSession,
@@ -53,16 +57,25 @@ export default function SessionTable({
   focusedSession,
   searchText,
   matchedSessions,
-  archived = false,
-  emptyState,
+  isArchivedView = false,
+  isDraftsView = false,
+  onNavigateToSessions,
+  onBypassPermissions,
 }: SessionTableProps) {
-  const { isOpen: isSessionLauncherOpen } = useSessionLauncher()
+  const isSessionLauncherOpen = useSessionLauncher(state => state.isOpen)
   const tableRef = useRef<HTMLTableElement>(null)
-  const { archiveSession, selectedSessions, toggleSessionSelection, bulkArchiveSessions, bulkSelect } =
-    useStore()
+  const { trackEvent } = usePostHogTracking()
+  const {
+    archiveSession,
+    selectedSessions,
+    toggleSessionSelection,
+    bulkArchiveSessions,
+    bulkSelect,
+    bulkDiscardDrafts,
+  } = useStore()
 
   // Determine scope based on archived state
-  const tableScope = archived ? HOTKEY_SCOPES.SESSIONS_ARCHIVED : HOTKEY_SCOPES.SESSIONS
+  const tableScope = isArchivedView ? HOTKEY_SCOPES.SESSIONS_ARCHIVED : HOTKEY_SCOPES.SESSIONS
 
   // State for inline editing
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
@@ -95,6 +108,131 @@ export default function SessionTable({
   const cancelEdit = () => {
     setEditingSessionId(null)
     setEditValue('')
+  }
+
+  // Direct discard handlers (no confirmation modal)
+  const handleSingleDiscardDraft = async (sessionId: string) => {
+    try {
+      const currentSession = sessions.find(s => s.id === sessionId)
+
+      // Find next session to focus
+      const currentIndex = sessions.findIndex(s => s.id === sessionId)
+      let nextSession = null
+      if (currentIndex > 0) {
+        nextSession = sessions[currentIndex - 1]
+      } else if (currentIndex < sessions.length - 1) {
+        nextSession = sessions[currentIndex + 1]
+      }
+
+      await daemonClient.deleteDraftSession(sessionId)
+
+      // Track draft deletion event with metadata (from main branch)
+      trackEvent(POSTHOG_EVENTS.DRAFT_DELETED, {
+        had_content: currentSession?.query?.trim() !== '',
+        lifetime_seconds: currentSession?.createdAt
+          ? Math.floor((Date.now() - new Date(currentSession.createdAt).getTime()) / 1000)
+          : undefined,
+      })
+
+      // Update status to 'discarded' instead of removing from state
+      // This allows undo functionality to work properly
+      useStore.getState().updateSessionStatus(sessionId, 'discarded')
+
+      if (nextSession && handleFocusSession) {
+        handleFocusSession(nextSession)
+      }
+
+      // Show undo toast for draft deletion
+      showUndoToast({
+        title: 'Draft discarded',
+        description: currentSession?.title || currentSession?.summary || 'Untitled draft',
+        toastId: TOAST_IDS.draftDeleteUndo(sessionId),
+        onUndo: async () => {
+          // Use the bulk restore endpoint for single draft restoration
+          // The regular updateSession can't restore discarded drafts
+          const response = await daemonClient.bulkRestoreDrafts({ session_ids: [sessionId] })
+
+          if (!response.success) {
+            throw new Error('Failed to restore draft')
+          }
+
+          // Refresh to show restored draft - this should re-fetch all sessions/drafts
+          await useStore.getState().refreshSessions()
+
+          // Get the updated sessions from the store after refresh
+          const updatedSessions = useStore.getState().sessions
+          const restoredDraft = updatedSessions.find(s => s.id === sessionId)
+          if (restoredDraft) {
+            handleFocusSession?.(restoredDraft)
+          } else {
+            // Try fetching directly as a fallback
+            const sessions = await daemonClient.listSessions()
+            const directRestoredDraft = sessions.find(s => s.id === sessionId)
+            if (directRestoredDraft) {
+              handleFocusSession?.(directRestoredDraft)
+            }
+          }
+        },
+      })
+
+      await useStore.getState().refreshSessions()
+    } catch (error) {
+      toast.error('Failed to discard draft', {
+        description: error instanceof Error ? error.message : 'Unknown error',
+      })
+    }
+  }
+
+  const handleBulkDiscardDrafts = async (draftIds: string[]) => {
+    try {
+      const nonSelectedSessions = sessions.filter(s => !draftIds.includes(s.id))
+
+      await bulkDiscardDrafts(draftIds)
+
+      // Track draft deletion events (from main branch)
+      draftIds.forEach(draftId => {
+        const draftSession = sessions.find(s => s.id === draftId)
+        trackEvent(POSTHOG_EVENTS.DRAFT_DELETED, {
+          had_content: draftSession?.query?.trim() !== '',
+          lifetime_seconds: draftSession?.createdAt
+            ? Math.floor((Date.now() - new Date(draftSession.createdAt).getTime()) / 1000)
+            : undefined,
+        })
+      })
+
+      if (nonSelectedSessions.length > 0 && handleFocusSession) {
+        handleFocusSession(nonSelectedSessions[0])
+      }
+
+      // Show undo toast for bulk draft deletion
+      const timestamp = Date.now()
+      showUndoToast({
+        title: `Discarded ${draftIds.length} drafts`,
+        toastId: TOAST_IDS.bulkDraftDeleteUndo(timestamp),
+        onUndo: async () => {
+          // Use the new bulk restore endpoint
+          const response = await daemonClient.bulkRestoreDrafts({ session_ids: draftIds })
+
+          if (!response.success && response.failed_sessions?.length) {
+            const successCount = draftIds.length - response.failed_sessions.length
+            toast.warning(`Restored ${successCount} of ${draftIds.length} drafts`, {
+              description: `${response.failed_sessions.length} drafts could not be restored`,
+              duration: 5000,
+            })
+          }
+          // No success toast when undo is successful - just silently restore
+
+          // Refresh sessions to show restored drafts
+          await useStore.getState().refreshSessions()
+        },
+      })
+
+      await useStore.getState().refreshSessions()
+    } catch (error) {
+      toast.error('Failed to discard drafts', {
+        description: error instanceof Error ? error.message : 'Unknown error',
+      })
+    }
   }
 
   // Helper to render highlighted text
@@ -142,7 +280,7 @@ export default function SessionTable({
   }, [focusedSession])
 
   useHotkeys(
-    'j',
+    'j, ArrowDown',
     () => {
       handleFocusNextSession?.()
     },
@@ -154,7 +292,7 @@ export default function SessionTable({
   )
 
   useHotkeys(
-    'k',
+    'k, ArrowUp',
     () => {
       handleFocusPreviousSession?.()
     },
@@ -165,9 +303,9 @@ export default function SessionTable({
     [handleFocusPreviousSession],
   )
 
-  // Bulk selection with shift+j/k
+  // Bulk selection with shift+j/k and shift+arrow keys
   useHotkeys(
-    'shift+j',
+    'shift+j, shift+ArrowDown',
     () => {
       if (focusedSession && sessions.length > 0) {
         bulkSelect(focusedSession.id, 'desc')
@@ -182,7 +320,7 @@ export default function SessionTable({
   )
 
   useHotkeys(
-    'shift+k',
+    'shift+k, shift+ArrowUp',
     () => {
       if (focusedSession && sessions.length > 0) {
         bulkSelect(focusedSession.id, 'asc')
@@ -280,7 +418,25 @@ export default function SessionTable({
             .map(sessionId => sessions.find(s => s.id === sessionId))
             .filter(Boolean)
 
-          // Check if all selected sessions have the same archived status
+          // Separate drafts from non-drafts
+          const draftSessions = selectedSessionObjects.filter(s => s?.status === SessionStatus.Draft)
+          const nonDraftSessions = selectedSessionObjects.filter(s => s?.status !== SessionStatus.Draft)
+
+          if (draftSessions.length > 0 && nonDraftSessions.length > 0) {
+            // Mixed selection: warn user
+            toast.warning(
+              'Cannot archive sessions and discard drafts in one operation. Please select only sessions or only drafts.',
+            )
+            return
+          }
+
+          if (draftSessions.length > 0) {
+            // Immediately discard drafts without confirmation
+            await handleBulkDiscardDrafts(draftSessions.map(s => s!.id))
+            return
+          }
+
+          // Original archive logic for non-drafts
           const archivedStatuses = selectedSessionObjects.map(s => s?.archived)
           const allSameStatus = archivedStatuses.every(status => status === archivedStatuses[0])
 
@@ -299,19 +455,42 @@ export default function SessionTable({
 
           await bulkArchiveSessions(Array.from(selectedSessions), isArchiving)
 
+          // Track the bulk archive/unarchive event
+          trackEvent(
+            isArchiving ? POSTHOG_EVENTS.SESSION_ARCHIVED : POSTHOG_EVENTS.SESSION_UNARCHIVED,
+            {
+              count: selectedSessions.size,
+            },
+          )
+
           // Focus next available session
           if (nextFocusSession && handleFocusSession) {
             handleFocusSession(nextFocusSession)
           }
 
-          toast.success(
-            isArchiving
-              ? `Archived ${selectedSessions.size} sessions`
-              : `Unarchived ${selectedSessions.size} sessions`,
-            {
-              duration: 3000,
-            },
-          )
+          // Show undo toast for bulk archive
+          const timestamp = Date.now()
+          const sessionIds = Array.from(selectedSessions)
+
+          if (isArchiving) {
+            showUndoToast({
+              title: `Archived ${selectedSessions.size} sessions`,
+              toastId: TOAST_IDS.bulkArchiveUndo(timestamp),
+              onUndo: async () => {
+                await bulkArchiveSessions(sessionIds, false)
+                await useStore.getState().refreshSessions()
+              },
+            })
+          } else {
+            showUndoToast({
+              title: `Unarchived ${selectedSessions.size} sessions`,
+              toastId: TOAST_IDS.bulkUnarchiveUndo(timestamp),
+              onUndo: async () => {
+                await bulkArchiveSessions(sessionIds, true)
+                await useStore.getState().refreshSessions()
+              },
+            })
+          }
         } else {
           // Single session archive
           const currentSession = sessions.find(s => s.id === focusedSession?.id)
@@ -319,7 +498,13 @@ export default function SessionTable({
             logger.log('No current session found')
             return
           }
-          const isArchiving = !currentSession.archived
+
+          // Handle drafts - discard instead of archive
+          if (currentSession.status === SessionStatus.Draft) {
+            // Immediately discard draft without confirmation
+            await handleSingleDiscardDraft(currentSession.id)
+            return
+          }
 
           // Find the index of current session and determine next focus
           const currentIndex = sessions.findIndex(s => s.id === currentSession.id)
@@ -333,18 +518,54 @@ export default function SessionTable({
             nextFocusSession = sessions[currentIndex + 1]
           }
 
+          // Archive logic
+          const isArchiving = !currentSession.archived
+
           await archiveSession(currentSession.id, isArchiving)
+
+          // Track the archive/unarchive event
+          trackEvent(
+            isArchiving ? POSTHOG_EVENTS.SESSION_ARCHIVED : POSTHOG_EVENTS.SESSION_UNARCHIVED,
+            {
+              count: 1,
+            },
+          )
 
           // Set focus to the determined session
           if (nextFocusSession && handleFocusSession) {
             handleFocusSession(nextFocusSession)
           }
 
-          // Show success notification
-          toast.success(isArchiving ? 'Session archived' : 'Session unarchived', {
-            description: currentSession.summary || 'Untitled session',
-            duration: 3000,
-          })
+          // Show undo toast for archive operation
+          if (isArchiving) {
+            showUndoToast({
+              title: 'Session archived',
+              description: currentSession.title || currentSession.summary || 'Untitled session',
+              toastId: TOAST_IDS.archiveUndo(currentSession.id),
+              onUndo: async () => {
+                await archiveSession(currentSession.id, false)
+                // Refresh sessions to update the UI
+                await useStore.getState().refreshSessions()
+                // Focus the unarchived session
+                const sessions = useStore.getState().sessions
+                const restoredSession = sessions.find(s => s.id === currentSession.id)
+                if (restoredSession && handleFocusSession) {
+                  handleFocusSession(restoredSession)
+                }
+              },
+            })
+          } else {
+            showUndoToast({
+              title: 'Session unarchived',
+              description: currentSession.title || currentSession.summary || 'Untitled session',
+              toastId: TOAST_IDS.unarchiveUndo(currentSession.id),
+              onUndo: async () => {
+                await archiveSession(currentSession.id, true)
+                // Refresh sessions to update the UI
+                await useStore.getState().refreshSessions()
+              },
+            })
+          }
         }
       } catch (error) {
         toast.error('Failed to archive session', {
@@ -364,7 +585,9 @@ export default function SessionTable({
       archiveSession,
       selectedSessions,
       bulkArchiveSessions,
+      bulkDiscardDrafts,
       handleFocusSession,
+      trackEvent,
     ],
   )
 
@@ -402,10 +625,39 @@ export default function SessionTable({
     [focusedSession, startEdit, editingSessionId],
   )
 
+  // Bypass permissions hotkey
+  const isInlineRenameOpen = editingSessionId !== null
+  useHotkeys(
+    'alt+y, option+y',
+    () => {
+      if (!focusedSession && selectedSessions.size === 0) {
+        return
+      }
+
+      // Get sessions to bypass
+      const sessionsToBypass =
+        selectedSessions.size > 0
+          ? Array.from(selectedSessions)
+          : focusedSession
+            ? [focusedSession.id]
+            : []
+
+      if (sessionsToBypass.length > 0) {
+        onBypassPermissions?.(sessionsToBypass)
+      }
+    },
+    {
+      scopes: [tableScope],
+      enabled: !isSessionLauncherOpen && !isInlineRenameOpen,
+      preventDefault: true,
+    },
+    [focusedSession, selectedSessions, onBypassPermissions, isInlineRenameOpen],
+  )
+
   return (
     <HotkeyScopeBoundary
       scope={tableScope}
-      componentName={`SessionTable-${archived ? 'archived' : 'normal'}`}
+      componentName={`SessionTable-${isArchivedView ? 'archived' : 'normal'}`}
     >
       {sessions.length > 0 ? (
         <>
@@ -414,9 +666,9 @@ export default function SessionTable({
             <TableHeader>
               <TableRow>
                 <TableHead className="w-[40px]"></TableHead>
-                <TableHead>Status</TableHead>
+                {!isDraftsView && <TableHead>Status</TableHead>}
                 <TableHead>Working Directory</TableHead>
-                <TableHead>Summary</TableHead>
+                <TableHead>Title</TableHead>
                 <TableHead>Model</TableHead>
                 <TableHead>Started</TableHead>
                 <TableHead>Last Activity</TableHead>
@@ -466,25 +718,27 @@ export default function SessionTable({
                       </div>
                     </div>
                   </TableCell>
-                  <TableCell className={getStatusTextClass(session.status)}>
-                    {session.status !== SessionStatus.Failed && (
-                      <>
-                        {session.dangerouslySkipPermissions ? (
-                          <>
-                            <ShieldOff
-                              className="inline-block w-4 h-4 text-[var(--terminal-error)] animate-pulse-error align-text-bottom"
-                              strokeWidth={3}
-                            />{' '}
-                          </>
-                        ) : session.autoAcceptEdits ? (
-                          <span className="align-text-top text-[var(--terminal-warning)] text-base leading-none animate-pulse-warning">
-                            {'⏵⏵ '}
-                          </span>
-                        ) : null}
-                      </>
-                    )}
-                    {renderSessionStatus(session)}
-                  </TableCell>
+                  {!isDraftsView && (
+                    <TableCell className={getStatusTextClass(session.status)}>
+                      {session.status !== SessionStatus.Failed && (
+                        <>
+                          {session.dangerouslySkipPermissions ? (
+                            <>
+                              <ShieldOff
+                                className="inline-block w-4 h-4 text-[var(--terminal-error)] animate-pulse-error align-text-bottom"
+                                strokeWidth={3}
+                              />{' '}
+                            </>
+                          ) : session.autoAcceptEdits ? (
+                            <span className="align-text-top text-[var(--terminal-warning)] text-base leading-none animate-pulse-warning">
+                              {'⏵⏵ '}
+                            </span>
+                          ) : null}
+                        </>
+                      )}
+                      {renderSessionStatus(session)}
+                    </TableCell>
+                  )}
                   <TableCell className="max-w-[200px]">
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -556,7 +810,13 @@ export default function SessionTable({
                     ) : (
                       <div className="flex items-center gap-2 group">
                         <span>
-                          {renderHighlightedText(session.title || session.summary || '', session.id)}
+                          {renderHighlightedText(
+                            session.title ||
+                              session.summary ||
+                              (session.query ? truncate(session.query, 80) : '') ||
+                              truncate(extractTextFromEditorState(session.editorState), 80),
+                            session.id,
+                          )}
                         </span>
                         <Button
                           size="sm"
@@ -594,15 +854,27 @@ export default function SessionTable({
             </TableBody>
           </Table>
         </>
-      ) : emptyState ? (
-        <EmptyState {...emptyState} />
+      ) : isArchivedView ? (
+        <ArchivedSessionsEmptyState onNavigateBack={() => onNavigateToSessions?.()} />
       ) : (
-        <EmptyState
-          icon={FileText}
-          title="No sessions found"
-          message={searchText ? `No sessions matching "${searchText}"` : 'No sessions yet'}
-        />
+        <SessionsEmptyState />
       )}
     </HotkeyScopeBoundary>
+  )
+}
+
+// Export wrapped version with error boundary
+export default function SessionTable(props: SessionTableProps) {
+  return (
+    <SentryErrorBoundary
+      variant="session-detail"
+      componentName="SessionTable"
+      handleRefresh={() => {
+        window.location.href = '/#/'
+      }}
+      refreshButtonText="Reload Sessions"
+    >
+      <SessionTableInner {...props} />
+    </SentryErrorBoundary>
   )
 }

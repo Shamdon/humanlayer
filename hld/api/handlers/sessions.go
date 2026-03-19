@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	claudecode "github.com/humanlayer/humanlayer/claudecode-go"
@@ -19,6 +21,7 @@ import (
 	"github.com/humanlayer/humanlayer/hld/internal/version"
 	"github.com/humanlayer/humanlayer/hld/session"
 	"github.com/humanlayer/humanlayer/hld/store"
+	"github.com/sahilm/fuzzy"
 )
 
 type SessionHandlers struct {
@@ -52,6 +55,106 @@ func NewSessionHandlersWithConfig(manager session.SessionManager, store store.Co
 		version:         version.GetVersion(),
 		config:          cfg,
 	}
+}
+
+// expandTilde expands ~ to the user's home directory
+func expandTilde(path string) string {
+	if len(path) > 0 && path[0] == '~' {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		if len(path) == 1 {
+			return home
+		}
+		if path[1] == filepath.Separator {
+			return filepath.Join(home, path[2:])
+		}
+		return filepath.Join(home, path[1:])
+	}
+	return path
+}
+
+// ValidateDirectory checks if a directory exists and returns its status
+func (h *SessionHandlers) ValidateDirectory(ctx context.Context, req api.ValidateDirectoryRequestObject) (api.ValidateDirectoryResponseObject, error) {
+	dirPath := req.Body.Path
+
+	// Expand ~ to home directory if needed
+	dirPath = expandTilde(dirPath)
+
+	// Check if directory exists
+	info, err := os.Stat(dirPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Directory doesn't exist but can be created
+			return api.ValidateDirectory200JSONResponse{
+				Exists:       false,
+				CanCreate:    ptr(true),
+				ExpandedPath: dirPath,
+			}, nil
+		}
+		// Other error (permissions, etc.)
+		errorMsg := err.Error()
+		return api.ValidateDirectory200JSONResponse{
+			Exists:       false,
+			CanCreate:    ptr(false),
+			Error:        &errorMsg,
+			ExpandedPath: dirPath,
+		}, nil
+	}
+
+	// Path exists - check if it's a directory
+	if !info.IsDir() {
+		errorMsg := "Path exists but is not a directory"
+		return api.ValidateDirectory200JSONResponse{
+			Exists:       true,
+			IsDirectory:  ptr(false),
+			Error:        &errorMsg,
+			ExpandedPath: dirPath,
+		}, nil
+	}
+
+	return api.ValidateDirectory200JSONResponse{
+		Exists:       true,
+		IsDirectory:  ptr(true),
+		ExpandedPath: dirPath,
+	}, nil
+}
+
+// CreateDirectory creates a directory and any necessary parent directories
+func (h *SessionHandlers) CreateDirectory(ctx context.Context, req api.CreateDirectoryRequestObject) (api.CreateDirectoryResponseObject, error) {
+	dirPath := req.Body.Path
+
+	// Expand ~ to home directory if needed
+	dirPath = expandTilde(dirPath)
+
+	// Create the directory with parent directories
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		slog.Error("Failed to create directory",
+			"path", dirPath,
+			"error", err)
+		return api.CreateDirectory500JSONResponse{
+			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
+				Error: api.ErrorDetail{
+					Code: "CREATE_DIRECTORY_FAILED",
+				},
+			},
+		}, nil
+	}
+
+	slog.Info("Created directory",
+		"path", dirPath)
+
+	created := true
+	return api.CreateDirectory200JSONResponse{
+		Path:    &dirPath,
+		Created: &created,
+	}, nil
+}
+
+// ptr is a helper function to get a pointer to a value
+func ptr[T any](v T) *T {
+	return &v
 }
 
 // CreateSession implements POST /sessions
@@ -132,13 +235,40 @@ func (h *SessionHandlers) CreateSession(ctx context.Context, req api.CreateSessi
 			config.Model = claudecode.ModelOpus
 		case api.Sonnet:
 			config.Model = claudecode.ModelSonnet
+		case api.Haiku:
+			config.Model = claudecode.ModelHaiku
 		default:
 			// Let Claude decide the default
 		}
 	}
 
-	session, err := h.manager.LaunchSession(ctx, config)
+	// Handle createDirectoryIfNotExists flag
+	if req.Body.CreateDirectoryIfNotExists != nil && *req.Body.CreateDirectoryIfNotExists {
+		config.CreateDirectoryIfNotExists = true
+	}
+
+	// Check for draft flag in request
+	isDraft := req.Body.Draft != nil && *req.Body.Draft
+
+	sess, err := h.manager.LaunchSession(ctx, config, isDraft)
 	if err != nil {
+		// Check if it's a directory not found error
+		var dirNotFound *session.DirectoryNotFoundError
+		if errors.As(err, &dirNotFound) {
+			// Return special status code to indicate directory needs creation
+			return api.CreateSession422JSONResponse{
+				Error:            "directory_not_found",
+				Message:          dirNotFound.Message,
+				Path:             dirNotFound.Path,
+				RequiresCreation: true,
+			}, nil
+		}
+		slog.Error("Failed to launch session",
+			"error", fmt.Sprintf("%v", err),
+			"query", config.Query,
+			"working_dir", config.WorkingDir,
+			"operation", "CreateSession",
+		)
 		return api.CreateSession500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -150,35 +280,33 @@ func (h *SessionHandlers) CreateSession(ctx context.Context, req api.CreateSessi
 	}
 
 	resp := api.CreateSessionResponse{}
-	resp.Data.SessionId = session.ID
-	resp.Data.RunId = session.RunID
+	resp.Data.SessionId = sess.ID
+	resp.Data.RunId = sess.RunID
 	return api.CreateSession201JSONResponse(resp), nil
 }
 
 // ListSessions implements GET /sessions
 func (h *SessionHandlers) ListSessions(ctx context.Context, req api.ListSessionsRequestObject) (api.ListSessionsResponseObject, error) {
-	leafOnly := true
-	if req.Params.LeafOnly != nil {
-		leafOnly = *req.Params.LeafOnly
+	// NEW: leavesOnly parameter (renamed from leafOnly, default true)
+	leavesOnly := true
+	if req.Params.LeavesOnly != nil {
+		leavesOnly = *req.Params.LeavesOnly
 	}
 
-	includeArchived := false
-	if req.Params.IncludeArchived != nil {
-		includeArchived = *req.Params.IncludeArchived
+	// NEW: filter parameter logic
+	var filterType string
+	if req.Params.Filter != nil {
+		filterType = string(*req.Params.Filter)
 	}
-
-	archivedOnly := false
-	if req.Params.ArchivedOnly != nil {
-		archivedOnly = *req.Params.ArchivedOnly
-	}
+	// When filter is nil, return ALL sessions (no filtering)
 
 	// Get all sessions from manager
 	sessionInfos := h.manager.ListSessions()
 
-	// Apply filters
-	var filtered []session.Info
+	// Determine which sessions to use for counting
+	var sessionsForCounting []session.Info
 
-	if leafOnly {
+	if leavesOnly {
 		// Build parent-to-children map
 		childrenMap := make(map[string][]string)
 		for _, s := range sessionInfos {
@@ -187,34 +315,40 @@ func (h *SessionHandlers) ListSessions(ctx context.Context, req api.ListSessions
 			}
 		}
 
-		// Filter to leaves only
+		// When leavesOnly, only count leaf sessions
 		for _, s := range sessionInfos {
-			if len(childrenMap[s.ID]) > 0 {
-				continue // Has children, not a leaf
+			if len(childrenMap[s.ID]) == 0 {
+				// This is a leaf session
+				sessionsForCounting = append(sessionsForCounting, s)
 			}
-
-			// Apply archive filter
-			if !includeArchived && s.Archived {
-				continue
-			}
-			if archivedOnly && !s.Archived {
-				continue
-			}
-
-			filtered = append(filtered, s)
 		}
 	} else {
-		// All sessions, apply archive filter
-		for _, s := range sessionInfos {
-			if !includeArchived && s.Archived {
-				continue
-			}
-			if archivedOnly && !s.Archived {
-				continue
-			}
+		// When not leavesOnly, count all sessions
+		sessionsForCounting = sessionInfos
+	}
 
-			filtered = append(filtered, s)
+	// Calculate counts based on the appropriate set of sessions
+	var normalCount, archivedCount, draftCount int
+	for _, s := range sessionsForCounting {
+		if s.Archived {
+			archivedCount++
+		} else if s.Status == session.StatusDraft {
+			draftCount++
+		} else if s.Status != session.StatusDiscarded {
+			normalCount++
 		}
+	}
+
+	// Apply filters for the returned list
+	var filtered []session.Info
+
+	for _, s := range sessionsForCounting {
+		// Apply filter logic
+		if !shouldIncludeSession(s, filterType) {
+			continue
+		}
+
+		filtered = append(filtered, s)
 	}
 
 	// Sort by last activity (newest first)
@@ -245,6 +379,11 @@ func (h *SessionHandlers) ListSessions(ctx context.Context, req api.ListSessions
 			DangerouslySkipPermissions:          info.DangerouslySkipPermissions,
 			DangerouslySkipPermissionsExpiresAt: info.DangerouslySkipPermissionsExpiresAt,
 			Archived:                            info.Archived,
+			EditorState:                         info.EditorState,
+			ProxyEnabled:                        info.ProxyEnabled,
+			ProxyBaseURL:                        info.ProxyBaseURL,
+			ProxyModelOverride:                  info.ProxyModelOverride,
+			ProxyAPIKey:                         info.ProxyAPIKey,
 		}
 
 		// Copy result data if available
@@ -258,8 +397,35 @@ func (h *SessionHandlers) ListSessions(ctx context.Context, req api.ListSessions
 
 	resp := api.SessionsResponse{
 		Data: sessions,
+		Counts: &struct {
+			Archived *int `json:"archived,omitempty"`
+			Draft    *int `json:"draft,omitempty"`
+			Normal   *int `json:"normal,omitempty"`
+		}{
+			Normal:   &normalCount,
+			Archived: &archivedCount,
+			Draft:    &draftCount,
+		},
 	}
 	return api.ListSessions200JSONResponse(resp), nil
+}
+
+// shouldIncludeSession helper function for filter logic
+func shouldIncludeSession(s session.Info, filterType string) bool {
+	switch filterType {
+	case "normal":
+		return !s.Archived && s.Status != session.StatusDraft && s.Status != session.StatusDiscarded
+	case "archived":
+		return s.Archived
+	case "draft":
+		return s.Status == session.StatusDraft && !s.Archived
+	case "":
+		// No filter specified - include ALL sessions
+		return true
+	default:
+		// Unknown filter - include all (graceful degradation)
+		return true
+	}
 }
 
 // GetSession retrieves details for a specific session
@@ -276,6 +442,11 @@ func (h *SessionHandlers) GetSession(ctx context.Context, req api.GetSessionRequ
 				},
 			}, nil
 		}
+		slog.Error("Failed to get session",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "GetSession",
+		)
 		return api.GetSession500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -295,7 +466,7 @@ func (h *SessionHandlers) GetSession(ctx context.Context, req api.GetSessionRequ
 // UpdateSession updates session settings (auto-accept, archived status)
 func (h *SessionHandlers) UpdateSession(ctx context.Context, req api.UpdateSessionRequestObject) (api.UpdateSessionResponseObject, error) {
 	// Debug log incoming request
-	slog.Info("UpdateSession called", "sessionId", req.Id, "body", req.Body)
+	// slog.Debug("UpdateSession called", "sessionId", req.Id, "body", req.Body)
 
 	update := store.SessionUpdate{}
 
@@ -314,6 +485,50 @@ func (h *SessionHandlers) UpdateSession(ctx context.Context, req api.UpdateSessi
 		update.Title = req.Body.Title
 	}
 
+	// Handle status updates with validation
+	if req.Body.Status != nil {
+		// Fetch current session to validate transition
+		sess, err := h.store.GetSession(ctx, string(req.Id))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return api.UpdateSession404JSONResponse{
+					NotFoundJSONResponse: api.NotFoundJSONResponse{
+						Error: api.ErrorDetail{
+							Code:    "HLD-1002",
+							Message: "Session not found",
+						},
+					},
+				}, nil
+			}
+			slog.Error("Failed to get session for status update",
+				"error", fmt.Sprintf("%v", err),
+				"session_id", req.Id,
+				"operation", "UpdateSession",
+			)
+			return api.UpdateSession500JSONResponse{
+				InternalErrorJSONResponse: api.InternalErrorJSONResponse{
+					Error: api.ErrorDetail{
+						Code:    "HLD-4001",
+						Message: err.Error(),
+					},
+				},
+			}, nil
+		}
+
+		// Validate allowed transitions
+		newStatus := string(*req.Body.Status)
+		if !isValidStatusTransition(sess.Status, newStatus) {
+			return api.UpdateSession400JSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-3001",
+					Message: fmt.Sprintf("Invalid status transition from %s to %s", sess.Status, newStatus),
+				},
+			}, nil
+		}
+
+		update.Status = &newStatus
+	}
+
 	// Update dangerously skip permissions if specified
 	if req.Body.DangerouslySkipPermissions != nil {
 		update.DangerouslySkipPermissions = req.Body.DangerouslySkipPermissions
@@ -323,14 +538,19 @@ func (h *SessionHandlers) UpdateSession(ctx context.Context, req api.UpdateSessi
 	if req.Body.DangerouslySkipPermissionsTimeoutMs != nil {
 		timeoutMs := *req.Body.DangerouslySkipPermissionsTimeoutMs
 		if timeoutMs > 0 {
+			// Store the timeout duration so we can recalculate the timer later (e.g., when launching a draft)
+			update.DangerouslySkipPermissionsTimeoutMs = &timeoutMs
+
 			// Convert milliseconds to time.Time
 			expiresAt := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 			expiresAtPtr := &expiresAt
 			update.DangerouslySkipPermissionsExpiresAt = &expiresAtPtr
 		} else {
-			// Clear the expiration if timeout is 0
+			// Clear the expiration and timeout if timeout is 0
 			var nilTime *time.Time
+			var nilTimeout int64 = 0
 			update.DangerouslySkipPermissionsExpiresAt = &nilTime
+			update.DangerouslySkipPermissionsTimeoutMs = &nilTimeout
 		}
 	}
 
@@ -376,6 +596,22 @@ func (h *SessionHandlers) UpdateSession(ctx context.Context, req api.UpdateSessi
 		}
 	}
 
+	// Update working directory if specified
+	if req.Body.WorkingDir != nil {
+		update.WorkingDir = req.Body.WorkingDir
+		slog.Info("Updating working directory",
+			"sessionId", req.Id,
+			"workingDir", *req.Body.WorkingDir)
+	}
+
+	// Update editor state if specified
+	if req.Body.EditorState != nil {
+		update.EditorState = req.Body.EditorState
+		// slog.Debug("Updating editor state",
+		// 	"sessionId", req.Id,
+		// 	"editorStateLength", len(*req.Body.EditorState))
+	}
+
 	err := h.manager.UpdateSessionSettings(ctx, string(req.Id), update)
 	if err != nil {
 		// Log the actual error for debugging
@@ -390,6 +626,11 @@ func (h *SessionHandlers) UpdateSession(ctx context.Context, req api.UpdateSessi
 				},
 			}, nil
 		}
+		slog.Error("Failed to update session settings",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "UpdateSession",
+		)
 		return api.UpdateSession500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -400,9 +641,45 @@ func (h *SessionHandlers) UpdateSession(ctx context.Context, req api.UpdateSessi
 		}, nil
 	}
 
+	// Auto-approve pending approvals if bypass permissions was just enabled
+	if req.Body.DangerouslySkipPermissions != nil && *req.Body.DangerouslySkipPermissions {
+		// Get all pending approvals for this session
+		pendingApprovals, err := h.approvalManager.GetPendingApprovals(ctx, string(req.Id))
+		if err != nil {
+			// Log error but don't fail the request
+			slog.Error("Failed to get pending approvals for auto-approval",
+				"error", err,
+				"session_id", req.Id,
+				"operation", "UpdateSession")
+		} else {
+			// Auto-approve each pending approval
+			for _, approval := range pendingApprovals {
+				err := h.approvalManager.ApproveToolCall(ctx, approval.ID, "Auto-approved due to bypass permissions")
+				if err != nil {
+					// Log error but continue with other approvals
+					slog.Error("Failed to auto-approve pending approval",
+						"error", err,
+						"approval_id", approval.ID,
+						"session_id", req.Id,
+						"operation", "UpdateSession")
+				} else {
+					slog.Info("Auto-approved pending approval due to bypass permissions",
+						"approval_id", approval.ID,
+						"session_id", req.Id,
+						"operation", "UpdateSession")
+				}
+			}
+		}
+	}
+
 	// Fetch updated session
 	session, err := h.store.GetSession(ctx, string(req.Id))
 	if err != nil {
+		slog.Error("Failed to fetch updated session",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "UpdateSession",
+		)
 		return api.UpdateSession500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -419,9 +696,320 @@ func (h *SessionHandlers) UpdateSession(ctx context.Context, req api.UpdateSessi
 	return api.UpdateSession200JSONResponse(resp), nil
 }
 
+// isValidStatusTransition validates if a status transition is allowed via PATCH
+func isValidStatusTransition(currentStatus, newStatus string) bool {
+	// Allow draft ↔ discarded transitions
+	if currentStatus == store.SessionStatusDraft && newStatus == store.SessionStatusDiscarded {
+		return true
+	}
+	if currentStatus == store.SessionStatusDiscarded && newStatus == store.SessionStatusDraft {
+		return true
+	}
+	// Allow no-op (setting to same status)
+	if currentStatus == newStatus {
+		return true
+	}
+	// Disallow all other status changes via PATCH
+	return false
+}
+
+// DeleteDraftSession deletes a draft session
+func (h *SessionHandlers) DeleteDraftSession(ctx context.Context, req api.DeleteDraftSessionRequestObject) (api.DeleteDraftSessionResponseObject, error) {
+	// Get the session and verify it's a draft
+	sess, err := h.store.GetSession(ctx, string(req.Id))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return api.DeleteDraftSession404JSONResponse{
+				NotFoundJSONResponse: api.NotFoundJSONResponse{
+					Error: api.ErrorDetail{
+						Code:    "HLD-4007",
+						Message: "Session not found",
+					},
+				},
+			}, nil
+		}
+		slog.Error("Failed to get session for deletion",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "DeleteDraftSession",
+		)
+		return api.DeleteDraftSession500JSONResponse{
+			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-4008",
+					Message: err.Error(),
+				},
+			},
+		}, nil
+	}
+
+	// Check if session is in draft state
+	if sess.Status != store.SessionStatusDraft {
+		return api.DeleteDraftSession400JSONResponse{
+			Error: api.ErrorDetail{
+				Code:    "HLD-4002",
+				Message: "Can only delete draft sessions",
+			},
+		}, nil
+	}
+
+	// Mark session as discarded (effectively removing it from the active list)
+	// We don't actually delete from the database, just mark as discarded
+	discardedStatus := string(store.SessionStatusDiscarded)
+	deletedMessage := "Draft session discarded"
+	update := store.SessionUpdate{
+		Status:       &discardedStatus,
+		ErrorMessage: &deletedMessage,
+	}
+
+	err = h.store.UpdateSession(ctx, string(req.Id), update)
+	if err != nil {
+		slog.Error("Failed to mark draft session as discarded",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "DeleteDraftSession",
+		)
+		return api.DeleteDraftSession500JSONResponse{
+			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-4009",
+					Message: fmt.Sprintf("Failed to delete draft session: %v", err),
+				},
+			},
+		}, nil
+	}
+
+	// Return 204 No Content on successful deletion
+	return api.DeleteDraftSession204Response{}, nil
+}
+
+// HardDeleteEmptyDraftSession permanently deletes an empty draft or discarded session
+func (h *SessionHandlers) HardDeleteEmptyDraftSession(ctx context.Context, req api.HardDeleteEmptyDraftSessionRequestObject) (api.HardDeleteEmptyDraftSessionResponseObject, error) {
+	// Fetch session
+	sess, err := h.store.GetSession(ctx, string(req.Id))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return api.HardDeleteEmptyDraftSession404JSONResponse{
+				NotFoundJSONResponse: api.NotFoundJSONResponse{
+					Error: api.ErrorDetail{
+						Code:    "HLD-1002",
+						Message: "Session not found",
+					},
+				},
+			}, nil
+		}
+		slog.Error("Failed to get session for hard delete",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "HardDeleteEmptyDraftSession",
+		)
+		return api.HardDeleteEmptyDraftSession500JSONResponse{
+			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-4009",
+					Message: err.Error(),
+				},
+			},
+		}, nil
+	}
+
+	// Validate is draft or discarded
+	if sess.Status != store.SessionStatusDraft && sess.Status != store.SessionStatusDiscarded {
+		return api.HardDeleteEmptyDraftSession400JSONResponse{
+			Error: api.ErrorDetail{
+				Code:    "HLD-4010",
+				Message: fmt.Sprintf("Can only hard delete draft or discarded sessions, current status: %s", sess.Status),
+			},
+		}, nil
+	}
+
+	// Validate session is empty
+	if !isDraftEmpty(sess) {
+		return api.HardDeleteEmptyDraftSession400JSONResponse{
+			Error: api.ErrorDetail{
+				Code:    "HLD-4011",
+				Message: "Can only hard delete empty drafts - this session has content",
+			},
+		}, nil
+	}
+
+	// Perform hard delete
+	err = h.store.HardDeleteSession(ctx, string(req.Id))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Session was already deleted (race condition)
+			return api.HardDeleteEmptyDraftSession404JSONResponse{
+				NotFoundJSONResponse: api.NotFoundJSONResponse{
+					Error: api.ErrorDetail{
+						Code:    "HLD-1002",
+						Message: "Session not found",
+					},
+				},
+			}, nil
+		}
+		slog.Error("Failed to hard delete session",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "HardDeleteEmptyDraftSession",
+		)
+		return api.HardDeleteEmptyDraftSession500JSONResponse{
+			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-4009",
+					Message: err.Error(),
+				},
+			},
+		}, nil
+	}
+
+	return api.HardDeleteEmptyDraftSession204Response{}, nil
+}
+
+// isDraftEmpty checks if a draft session has no meaningful content
+func isDraftEmpty(sess *store.Session) bool {
+	// Draft is empty if it has:
+	// - No title (or default title)
+	// - No query (or empty/whitespace query)
+	// - Default model (or no model)
+	// - No editor state (or empty editor state)
+
+	hasTitle := sess.Title != "" && sess.Title != "Untitled"
+	hasQuery := sess.Query != "" && strings.TrimSpace(sess.Query) != ""
+	hasEditorState := sess.EditorState != nil && *sess.EditorState != "" && *sess.EditorState != "{}"
+	hasNonDefaultModel := sess.Model != "" && sess.Model != "sonnet"
+
+	// Empty if ALL of these are false
+	return !hasTitle && !hasQuery && !hasEditorState && !hasNonDefaultModel
+}
+
+// LaunchDraftSession launches a draft session
+func (h *SessionHandlers) LaunchDraftSession(ctx context.Context, req api.LaunchDraftSessionRequestObject) (api.LaunchDraftSessionResponseObject, error) {
+	// Get the session and verify it's a draft
+	sess, err := h.store.GetSession(ctx, string(req.Id))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return api.LaunchDraftSession404JSONResponse{
+				NotFoundJSONResponse: api.NotFoundJSONResponse{
+					Error: api.ErrorDetail{
+						Code:    "HLD-4003",
+						Message: "Session not found",
+					},
+				},
+			}, nil
+		}
+		slog.Error("Failed to get draft session for launch",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "LaunchDraftSession",
+		)
+		return api.LaunchDraftSession500JSONResponse{
+			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-4004",
+					Message: err.Error(),
+				},
+			},
+		}, nil
+	}
+
+	// Check if session is in draft state
+	if sess.Status != store.SessionStatusDraft {
+		return api.LaunchDraftSession400JSONResponse{
+			Error: api.ErrorDetail{
+				Code:    "HLD-4001",
+				Message: "Session is not in draft state",
+			},
+		}, nil
+	}
+
+	// If bypass permissions is enabled with a stored timeout duration, recalculate the expiration
+	// time from now, so the timer starts when the draft is launched rather than when it was set
+	if sess.DangerouslySkipPermissions && sess.DangerouslySkipPermissionsTimeoutMs != nil && *sess.DangerouslySkipPermissionsTimeoutMs > 0 {
+		timeoutMs := *sess.DangerouslySkipPermissionsTimeoutMs
+
+		// Recalculate expiration from now
+		expiresAt := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+		expiresAtPtr := &expiresAt
+
+		// Update the session with the new expiration time
+		update := store.SessionUpdate{
+			DangerouslySkipPermissionsExpiresAt: &expiresAtPtr,
+		}
+
+		err = h.store.UpdateSession(ctx, string(req.Id), update)
+		if err != nil {
+			slog.Error("failed to update bypass permissions timer on draft launch",
+				"session_id", req.Id,
+				"error", err)
+			// Don't fail the launch if timer update fails, but log it
+		} else {
+			slog.Info("recalculated bypass permissions timer on draft launch",
+				"session_id", req.Id,
+				"timeout_ms", timeoutMs)
+		}
+	}
+
+	// Extract createDirectoryIfNotExists flag (default false)
+	createDirectoryIfNotExists := false
+	if req.Body.CreateDirectoryIfNotExists != nil {
+		createDirectoryIfNotExists = *req.Body.CreateDirectoryIfNotExists
+	}
+
+	// Launch the draft session
+	err = h.manager.LaunchDraftSession(ctx, string(req.Id), req.Body.Prompt, createDirectoryIfNotExists)
+	if err != nil {
+		// Check if it's a directory not found error
+		var dirNotFound *session.DirectoryNotFoundError
+		if errors.As(err, &dirNotFound) {
+			// Return special status code to indicate directory needs creation
+			return api.LaunchDraftSession422JSONResponse{
+				Error:            "directory_not_found",
+				Message:          dirNotFound.Message,
+				Path:             dirNotFound.Path,
+				RequiresCreation: true,
+			}, nil
+		}
+		slog.Error("Failed to launch draft session",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "LaunchDraftSession")
+		return api.LaunchDraftSession500JSONResponse{
+			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-4005",
+					Message: fmt.Sprintf("Failed to launch draft session: %v", err),
+				},
+			},
+		}, nil
+	}
+
+	// Fetch updated session to return
+	updatedSession, err := h.store.GetSession(ctx, string(req.Id))
+	if err != nil {
+		slog.Error("Failed to get updated session after launch",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "LaunchDraftSession",
+		)
+		return api.LaunchDraftSession500JSONResponse{
+			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-4006",
+					Message: "Failed to get updated session after launch",
+				},
+			},
+		}, nil
+	}
+
+	resp := api.SessionResponse{
+		Data: h.mapper.SessionToAPI(*updatedSession),
+	}
+	return api.LaunchDraftSession200JSONResponse(resp), nil
+}
+
 // ContinueSession creates a new session that continues from an existing one
 func (h *SessionHandlers) ContinueSession(ctx context.Context, req api.ContinueSessionRequestObject) (api.ContinueSessionResponseObject, error) {
-	_, err := h.store.GetSession(ctx, string(req.Id))
+	parentSession, err := h.store.GetSession(ctx, string(req.Id))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return api.ContinueSession404JSONResponse{
@@ -433,11 +1021,28 @@ func (h *SessionHandlers) ContinueSession(ctx context.Context, req api.ContinueS
 				},
 			}, nil
 		}
+		slog.Error("Failed to get parent session for continuation",
+			"error", fmt.Sprintf("%v", err),
+			"parent_session_id", req.Id,
+			"operation", "ContinueSession",
+		)
 		return api.ContinueSession500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
 					Code:    "HLD-4001",
 					Message: err.Error(),
+				},
+			},
+		}, nil
+	}
+
+	// Check if parent session is in draft state
+	if parentSession.Status == store.SessionStatusDraft {
+		return api.ContinueSession500JSONResponse{
+			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-4003",
+					Message: "Cannot continue from draft session",
 				},
 			},
 		}, nil
@@ -479,6 +1084,12 @@ func (h *SessionHandlers) ContinueSession(ctx context.Context, req api.ContinueS
 
 	result, err := h.manager.ContinueSession(ctx, continueConfig)
 	if err != nil {
+		slog.Error("Failed to continue session",
+			"error", fmt.Sprintf("%v", err),
+			"parent_session_id", req.Id,
+			"query", req.Body.Query,
+			"operation", "ContinueSession",
+		)
 		return api.ContinueSession500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -492,6 +1103,12 @@ func (h *SessionHandlers) ContinueSession(ctx context.Context, req api.ContinueS
 	// Get the created session to get the claude session ID
 	newSession, err := h.store.GetSession(ctx, result.ID)
 	if err != nil {
+		slog.Error("Failed to get created session details",
+			"error", fmt.Sprintf("%v", err),
+			"parent_session_id", req.Id,
+			"new_session_id", result.ID,
+			"operation", "ContinueSession",
+		)
 		return api.ContinueSession500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -524,6 +1141,11 @@ func (h *SessionHandlers) InterruptSession(ctx context.Context, req api.Interrup
 				},
 			}, nil
 		}
+		slog.Error("Failed to get session for interrupt",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "InterruptSession",
+		)
 		return api.InterruptSession500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -545,6 +1167,11 @@ func (h *SessionHandlers) InterruptSession(ctx context.Context, req api.Interrup
 
 	err = h.manager.InterruptSession(ctx, string(req.Id))
 	if err != nil {
+		slog.Error("Failed to interrupt session",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "InterruptSession",
+		)
 		return api.InterruptSession500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -576,6 +1203,11 @@ func (h *SessionHandlers) GetSessionMessages(ctx context.Context, req api.GetSes
 				},
 			}, nil
 		}
+		slog.Error("Failed to get session conversation",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "GetSessionMessages",
+		)
 		return api.GetSessionMessages500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -612,6 +1244,11 @@ func (h *SessionHandlers) GetSessionSnapshots(ctx context.Context, req api.GetSe
 				},
 			}, nil
 		}
+		slog.Error("Failed to verify session exists for snapshots",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "GetSessionSnapshots",
+		)
 		return api.GetSessionSnapshots500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -624,6 +1261,11 @@ func (h *SessionHandlers) GetSessionSnapshots(ctx context.Context, req api.GetSe
 
 	snapshots, err := h.store.GetFileSnapshots(ctx, string(req.Id))
 	if err != nil {
+		slog.Error("Failed to get file snapshots",
+			"error", fmt.Sprintf("%v", err),
+			"session_id", req.Id,
+			"operation", "GetSessionSnapshots",
+		)
 		return api.GetSessionSnapshots500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -686,6 +1328,64 @@ func (h *SessionHandlers) BulkArchiveSessions(ctx context.Context, req api.BulkA
 	}, nil
 }
 
+// BulkRestoreDrafts restores multiple discarded draft sessions back to draft status
+func (h *SessionHandlers) BulkRestoreDrafts(ctx context.Context, req api.BulkRestoreDraftsRequestObject) (api.BulkRestoreDraftsResponseObject, error) {
+	if req.Body == nil || len(req.Body.SessionIds) == 0 {
+		return api.BulkRestoreDrafts400JSONResponse{
+			BadRequestJSONResponse: api.BadRequestJSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-3002",
+					Message: "session_ids is required and must not be empty",
+				},
+			},
+		}, nil
+	}
+
+	var failedSessions []string
+	for _, sessionID := range req.Body.SessionIds {
+		// First check if session exists and is in discarded state
+		sess, err := h.store.GetSession(ctx, sessionID)
+		if err != nil {
+			failedSessions = append(failedSessions, sessionID)
+			continue
+		}
+
+		if sess.Status != store.SessionStatusDiscarded {
+			failedSessions = append(failedSessions, sessionID)
+			continue
+		}
+
+		draftStatus := string(store.SessionStatusDraft)
+		update := store.SessionUpdate{
+			Status: &draftStatus,
+		}
+		if err := h.store.UpdateSession(ctx, sessionID, update); err != nil {
+			failedSessions = append(failedSessions, sessionID)
+		}
+	}
+
+	if len(failedSessions) > 0 {
+		return api.BulkRestoreDrafts207JSONResponse{
+			Data: struct {
+				FailedSessions *[]string `json:"failed_sessions,omitempty"`
+				Success        bool      `json:"success"`
+			}{
+				Success:        false,
+				FailedSessions: &failedSessions,
+			},
+		}, nil
+	}
+
+	return api.BulkRestoreDrafts200JSONResponse{
+		Data: struct {
+			FailedSessions *[]string `json:"failed_sessions,omitempty"`
+			Success        bool      `json:"success"`
+		}{
+			Success: true,
+		},
+	}, nil
+}
+
 // GetRecentPaths retrieves recently used working directories
 func (h *SessionHandlers) GetRecentPaths(ctx context.Context, req api.GetRecentPathsRequestObject) (api.GetRecentPathsResponseObject, error) {
 	limit := 20
@@ -695,6 +1395,11 @@ func (h *SessionHandlers) GetRecentPaths(ctx context.Context, req api.GetRecentP
 
 	paths, err := h.store.GetRecentWorkingDirs(ctx, limit)
 	if err != nil {
+		slog.Error("Failed to get recent working directories",
+			"error", fmt.Sprintf("%v", err),
+			"limit", limit,
+			"operation", "GetRecentPaths",
+		)
 		return api.GetRecentPaths500JSONResponse{
 			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
 				Error: api.ErrorDetail{
@@ -891,4 +1596,210 @@ func (h *SessionHandlers) GetDebugInfo(ctx context.Context, req api.GetDebugInfo
 	}
 
 	return response, nil
+}
+
+// GetSlashCommands retrieves available slash commands for a working directory
+func (h *SessionHandlers) GetSlashCommands(ctx context.Context, req api.GetSlashCommandsRequestObject) (api.GetSlashCommandsResponseObject, error) {
+	// Get working directory from parameters
+	workingDir := req.Params.WorkingDir
+	if workingDir == "" {
+		slog.Error("Working directory not provided",
+			"operation", "GetSlashCommands",
+		)
+		return api.GetSlashCommands400JSONResponse{
+			BadRequestJSONResponse: api.BadRequestJSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-4001",
+					Message: "Working directory is required",
+				},
+			},
+		}, nil
+	}
+
+	// Build command directory paths
+	localCommandsDir := filepath.Join(expandTilde(workingDir), ".claude", "commands")
+
+	// Respect CLAUDE_CONFIG_DIR for global commands
+	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if configDir == "" {
+		// Fall back to default Claude Code location
+		homeDir, err := os.UserHomeDir()
+		if err == nil {
+			configDir = filepath.Join(homeDir, ".config", "claude-code")
+		}
+	}
+	globalCommandsDir := filepath.Join(expandTilde(configDir), "commands")
+
+	// Use a map to track commands and handle deduplication
+	// Key is command name, value is the command with source
+	commandMap := make(map[string]api.SlashCommand)
+
+	// Helper function to discover commands from a directory
+	discoverCommands := func(dir string, source api.SlashCommandSource) error {
+		if dir == "" {
+			return nil
+		}
+
+		return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				// Directory might not exist, that's ok
+				return nil
+			}
+
+			if !d.IsDir() && strings.HasSuffix(path, ".md") {
+				// Convert path to command name with colon convention
+				relPath, _ := filepath.Rel(dir, path)
+				commandName := strings.TrimSuffix(relPath, ".md")
+
+				// Convert path separators to colons
+				commandName = strings.ReplaceAll(commandName, string(filepath.Separator), ":")
+				fullCommandName := "/" + commandName
+
+				// Check if command already exists
+				if _, exists := commandMap[fullCommandName]; exists {
+					// Global commands take precedence
+					if source == api.SlashCommandSourceGlobal {
+						commandMap[fullCommandName] = api.SlashCommand{
+							Name:   fullCommandName,
+							Source: source,
+						}
+					}
+					// If source is "local" and global already exists, do nothing (global wins)
+				} else {
+					// New command, add it
+					commandMap[fullCommandName] = api.SlashCommand{
+						Name:   fullCommandName,
+						Source: source,
+					}
+				}
+			}
+
+			return nil
+		})
+	}
+
+	// Discover local commands first
+	if err := discoverCommands(localCommandsDir, api.SlashCommandSourceLocal); err != nil && !os.IsNotExist(err) {
+		slog.Warn("Failed to read local commands directory",
+			"error", fmt.Sprintf("%v", err),
+			"commands_dir", localCommandsDir,
+			"operation", "GetSlashCommands",
+		)
+	}
+
+	// Then discover global commands (these will override local if duplicates exist)
+	if err := discoverCommands(globalCommandsDir, api.SlashCommandSourceGlobal); err != nil && !os.IsNotExist(err) {
+		slog.Warn("Failed to read global commands directory",
+			"error", fmt.Sprintf("%v", err),
+			"commands_dir", globalCommandsDir,
+			"operation", "GetSlashCommands",
+		)
+	}
+
+	// Extract all commands from map
+	var allCommands []api.SlashCommand
+	for _, cmd := range commandMap {
+		allCommands = append(allCommands, cmd)
+	}
+
+	// Initialize results as empty array instead of nil
+	results := []api.SlashCommand{}
+
+	// Apply fuzzy search if query provided
+	if req.Params.Query != nil && *req.Params.Query != "" && *req.Params.Query != "/" {
+		query := strings.TrimPrefix(*req.Params.Query, "/")
+
+		// Create searchable items (without slash prefix)
+		type searchItem struct {
+			Command api.SlashCommand
+			Name    string
+		}
+		var searchItems []searchItem
+		for _, cmd := range allCommands {
+			searchItems = append(searchItems, searchItem{
+				Command: cmd,
+				Name:    strings.TrimPrefix(cmd.Name, "/"),
+			})
+		}
+
+		// Extract just names for fuzzy search
+		var names []string
+		for _, item := range searchItems {
+			names = append(names, item.Name)
+		}
+
+		// Fuzzy search
+		matches := fuzzy.Find(query, names)
+
+		// Build results maintaining the original command objects with source
+		for _, match := range matches {
+			for _, item := range searchItems {
+				if item.Name == match.Str {
+					results = append(results, item.Command)
+					break
+				}
+			}
+		}
+	} else {
+		// Return all commands if no query
+		results = allCommands
+
+		// Sort alphabetically when no query, with local as tiebreaker
+		sort.Slice(results, func(i, j int) bool {
+			// Sort by name, but local comes before global as tiebreaker
+			if results[i].Name == results[j].Name {
+				return results[i].Source == api.SlashCommandSourceLocal && results[j].Source == api.SlashCommandSourceGlobal
+			}
+			return results[i].Name < results[j].Name
+		})
+	}
+
+	return api.GetSlashCommands200JSONResponse{
+		Data: results,
+	}, nil
+}
+
+// SearchSessions handles GET /sessions/search
+func (h *SessionHandlers) SearchSessions(ctx context.Context, req api.SearchSessionsRequestObject) (api.SearchSessionsResponseObject, error) {
+	// Extract query parameters
+	query := ""
+	if req.Params.Query != nil {
+		query = strings.TrimSpace(*req.Params.Query)
+	}
+
+	limit := 10
+	if req.Params.Limit != nil {
+		limit = *req.Params.Limit
+	}
+
+	// Search sessions in database
+	sessions, err := h.store.SearchSessionsByTitle(ctx, query, limit)
+	if err != nil {
+		slog.Error("Failed to search sessions",
+			"error", fmt.Sprintf("%v", err),
+			"query", query,
+			"limit", limit,
+			"operation", "SearchSessions",
+		)
+		return api.SearchSessions500JSONResponse{
+			InternalErrorJSONResponse: api.InternalErrorJSONResponse{
+				Error: api.ErrorDetail{
+					Code:    "HLD-500",
+					Message: fmt.Sprintf("Failed to search sessions: %v", err),
+				},
+			},
+		}, nil
+	}
+
+	// Convert to API response format
+	apiSessions := make([]api.Session, 0, len(sessions))
+	for _, s := range sessions {
+		apiSession := h.mapper.SessionToAPI(*s)
+		apiSessions = append(apiSessions, apiSession)
+	}
+
+	// Return response
+	return api.SearchSessions200JSONResponse{
+		Data: apiSessions,
+	}, nil
 }

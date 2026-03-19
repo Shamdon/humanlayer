@@ -4,7 +4,11 @@ import type { LaunchSessionRequest } from '@/lib/daemon/types'
 import { useHotkeys } from 'react-hotkeys-hook'
 import { exists } from '@tauri-apps/plugin-fs'
 import { homeDir } from '@tauri-apps/api/path'
+import { logger } from '@/lib/logging'
+import { useStore } from '@/AppStore'
 import { HOTKEY_SCOPES } from '@/hooks/hotkeys/scopes'
+import { usePostHogTracking } from '@/hooks/usePostHogTracking'
+import { POSTHOG_EVENTS } from '@/lib/telemetry/events'
 
 interface SessionConfig {
   title?: string
@@ -20,13 +24,11 @@ interface SessionConfig {
 interface LauncherState {
   isOpen: boolean
   mode: 'command'
-  view: 'menu' | 'input'
   query: string
   config: SessionConfig
   isLaunching: boolean
   error?: string
   gPrefixMode: boolean
-  selectedMenuIndex: number
 
   // Actions
   open: () => void
@@ -34,10 +36,8 @@ interface LauncherState {
   setQuery: (query: string) => void
   setConfig: (config: SessionConfig) => void
   setGPrefixMode: (enabled: boolean) => void
-  setView: (view: 'menu' | 'input') => void
-  setSelectedMenuIndex: (index: number) => void
   launchSession: () => Promise<void>
-  createNewSession: () => void
+  createNewSession: () => Promise<void>
   openSessionById: (sessionId: string) => void
   reset: () => void
 }
@@ -47,7 +47,7 @@ const isViewingSessionDetail = (): boolean => {
   return /^#\/sessions\/[^/]+$/.test(hash)
 }
 
-const LAST_WORKING_DIR_KEY = 'humanlayer-last-working-dir'
+export const LAST_WORKING_DIR_KEY = 'humanlayer-last-working-dir'
 const SESSION_LAUNCHER_QUERY_KEY = 'session-launcher-query'
 const OPENROUTER_API_KEY = 'humanlayer-openrouter-api-key'
 const BASETEN_API_KEY = 'humanlayer-baseten-api-key'
@@ -85,6 +85,10 @@ export const clearSavedModelPreferences = (): void => {
   localStorage.removeItem(OPENROUTER_MODEL_KEY)
   localStorage.removeItem(BASETEN_MODEL_KEY)
 }
+
+// Export localStorage key helpers (used by other components)
+export const getLastWorkingDir = () => localStorage.getItem(LAST_WORKING_DIR_KEY)
+export const setLastWorkingDir = (dir: string) => localStorage.setItem(LAST_WORKING_DIR_KEY, dir)
 
 // Helper function to get default working directory
 const getDefaultWorkingDir = (): string => {
@@ -128,7 +132,6 @@ const getSavedAdditionalDirectories = (): string[] => {
 export const useSessionLauncher = create<LauncherState>((set, get) => ({
   isOpen: false,
   mode: 'command',
-  view: 'menu',
   query: getSavedQuery(),
   config: {
     workingDir: getDefaultWorkingDir(),
@@ -140,14 +143,11 @@ export const useSessionLauncher = create<LauncherState>((set, get) => ({
   },
   isLaunching: false,
   gPrefixMode: false,
-  selectedMenuIndex: 0,
 
   open: () =>
     set({
       isOpen: true,
       mode: 'command', // Always command mode
-      view: 'menu',
-      selectedMenuIndex: 0,
       error: undefined,
     }),
 
@@ -156,7 +156,6 @@ export const useSessionLauncher = create<LauncherState>((set, get) => ({
     const savedProvider = getSavedProvider()
     set({
       isOpen: false,
-      view: 'menu',
       query: savedQuery,
       config: {
         workingDir: getDefaultWorkingDir(),
@@ -166,7 +165,6 @@ export const useSessionLauncher = create<LauncherState>((set, get) => ({
         basetenApiKey: getSavedBasetenKey(),
         additionalDirectories: getSavedAdditionalDirectories(),
       },
-      selectedMenuIndex: 0,
       error: undefined,
       gPrefixMode: false,
     })
@@ -244,10 +242,6 @@ export const useSessionLauncher = create<LauncherState>((set, get) => ({
   },
 
   setGPrefixMode: enabled => set({ gPrefixMode: enabled }),
-
-  setView: view => set({ view }),
-
-  setSelectedMenuIndex: index => set({ selectedMenuIndex: index }),
 
   launchSession: async () => {
     const { query, config } = get()
@@ -375,23 +369,27 @@ export const useSessionLauncher = create<LauncherState>((set, get) => ({
     }
   },
 
-  createNewSession: () => {
-    const savedQuery = getSavedQuery()
-    const savedProvider = getSavedProvider()
-    // Switch to input mode for session creation
-    set({
-      view: 'input',
-      query: savedQuery,
-      config: {
-        workingDir: getDefaultWorkingDir(),
-        provider: savedProvider,
-        model: getSavedModel(savedProvider),
-        openRouterApiKey: getSavedOpenRouterKey(),
-        basetenApiKey: getSavedBasetenKey(),
-        additionalDirectories: getSavedAdditionalDirectories(),
-      },
-      error: undefined,
-    })
+  createNewSession: async () => {
+    // Create draft session and navigate directly
+    try {
+      const response = await daemonClient.launchSession({
+        query: '', // Empty initial query for draft
+        working_dir: getLastWorkingDir() || '~/',
+        draft: true, // Create as draft
+      })
+
+      // Refresh sessions to include the new draft
+      await useStore.getState().refreshSessions()
+
+      // Close the command palette
+      get().close()
+
+      // Navigate directly to SessionDetail
+      window.location.hash = `#/sessions/${response.sessionId}`
+    } catch (error) {
+      logger.error('Failed to create draft session:', error)
+      set({ error: 'Failed to create draft session' })
+    }
   },
 
   openSessionById: (sessionId: string) => {
@@ -406,7 +404,6 @@ export const useSessionLauncher = create<LauncherState>((set, get) => ({
     return set({
       isOpen: false,
       mode: 'command',
-      view: 'menu',
       query: savedQuery,
       config: {
         workingDir: getDefaultWorkingDir(),
@@ -416,7 +413,6 @@ export const useSessionLauncher = create<LauncherState>((set, get) => ({
         basetenApiKey: getSavedBasetenKey(),
         additionalDirectories: getSavedAdditionalDirectories(),
       },
-      selectedMenuIndex: 0,
       isLaunching: false,
       error: undefined,
       gPrefixMode: false,
@@ -429,7 +425,8 @@ export { isViewingSessionDetail }
 
 // Helper hook for global hotkey management
 export function useSessionLauncherHotkeys() {
-  const { open, close, isOpen, setGPrefixMode, createNewSession } = useSessionLauncher()
+  const { open, close, isOpen, setGPrefixMode } = useSessionLauncher()
+  const { trackEvent } = usePostHogTracking()
 
   // Helper to check if user is actively typing in a text input
   const isTypingInInput = () => {
@@ -449,6 +446,10 @@ export function useSessionLauncherHotkeys() {
     'meta+k, ctrl+k',
     () => {
       if (!isOpen) {
+        // Track command launcher opened event
+        trackEvent(POSTHOG_EVENTS.COMMAND_LAUNCHER_OPENED, {
+          trigger_method: 'hotkey',
+        })
         open()
       } else {
         close()
@@ -460,15 +461,13 @@ export function useSessionLauncherHotkeys() {
     },
   )
 
-  // C - Create new session (root scope)
+  // C - Navigate to new draft session route (root scope)
   useHotkeys(
     'c',
     () => {
-      // Open launcher if not already open
-      if (!isOpen) {
-        open()
-      }
-      createNewSession()
+      // Navigate to draft route without creating a session
+      // The draft will be created lazily when user starts typing
+      window.location.hash = '/sessions/draft'
     },
     {
       scopes: [HOTKEY_SCOPES.ROOT],

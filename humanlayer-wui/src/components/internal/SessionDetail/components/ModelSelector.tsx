@@ -1,25 +1,37 @@
-import { useState, useEffect } from 'react'
-import { GitBranch, AlertCircle, CheckCircle, Pencil, Eye, EyeOff } from 'lucide-react'
+import { useStore } from '@/AppStore'
+import { HotkeyScopeBoundary } from '@/components/HotkeyScopeBoundary'
+import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
   DialogTrigger,
 } from '@/components/ui/dialog'
-import { Button } from '@/components/ui/button'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { HOTKEY_SCOPES } from '@/hooks/hotkeys/scopes'
+import { useFocusTrap } from '@/hooks/useFocusTrap'
+import { usePostHogTracking } from '@/hooks/usePostHogTracking'
 import { daemonClient } from '@/lib/daemon'
-import { Session, ConfigStatus } from '@/lib/daemon/types'
+import { ConfigStatus, Session } from '@/lib/daemon/types'
+import { POSTHOG_EVENTS } from '@/lib/telemetry/events'
+import { AlertCircle, CheckCircle, Eye, EyeOff, GitBranch, Pencil } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { useHotkeys } from 'react-hotkeys-hook'
 import { toast } from 'sonner'
-import { useStore } from '@/AppStore'
 
 interface ModelSelectorProps {
   session: Session
-  onModelChange?: (model: string) => void
+  onModelChange?: (config: {
+    model?: string
+    proxyEnabled: boolean
+    proxyBaseUrl?: string
+    proxyModelOverride?: string
+    provider: 'anthropic' | 'openrouter' | 'baseten'
+  }) => void
   className?: string
   open?: boolean
   onOpenChange?: (open: boolean) => void
@@ -32,6 +44,7 @@ function ModelSelectorContent({
 }: Omit<ModelSelectorProps, 'className'> & { onClose: () => void }) {
   const fetchActiveSessionDetail = useStore(state => state.fetchActiveSessionDetail)
   const userSettings = useStore(state => state.userSettings)
+  const { trackEvent } = usePostHogTracking()
 
   const isAdvancedProvidersEnabled = userSettings?.advancedProviders ?? false
 
@@ -79,6 +92,11 @@ function ModelSelectorContent({
     return localStorage.getItem('humanlayer-openrouter-api-key') || ''
   })
   const [showPassword, setShowPassword] = useState(false)
+
+  // Focus management
+  const focusTrapRef = useFocusTrap(true, {
+    allowTabNavigation: false,
+  })
 
   // Update local state when session changes
   useEffect(() => {
@@ -174,6 +192,10 @@ function ModelSelectorContent({
 
     setIsUpdating(true)
     try {
+      // Capture previous values for tracking
+      const previousProvider = initial.provider
+      const previousModel = initial.model
+
       // Determine provider and model
       let modelValue = ''
       let proxyConfig: any = {}
@@ -209,11 +231,13 @@ function ModelSelectorContent({
         modelValue = '' // Clear Anthropic model when using proxy
       }
 
-      // Update session with model and proxy configuration
-      await daemonClient.updateSession(session.id, {
-        model: modelValue || undefined,
-        ...proxyConfig,
-      })
+      // Update session with model and proxy configuration (only if session exists)
+      if (session.id) {
+        await daemonClient.updateSession(session.id, {
+          model: modelValue || undefined,
+          ...proxyConfig,
+        })
+      }
 
       // Save API key to localStorage if provided
       if (apiKey && provider === 'openrouter') {
@@ -222,13 +246,30 @@ function ModelSelectorContent({
         localStorage.setItem('humanlayer-baseten-api-key', apiKey)
       }
 
-      // Notify parent component
+      // Notify parent component with full configuration
       if (onModelChange) {
-        onModelChange(modelValue)
+        onModelChange({
+          model: modelValue || undefined,
+          proxyEnabled: provider !== 'anthropic',
+          proxyBaseUrl: proxyConfig.proxyBaseUrl,
+          proxyModelOverride: proxyConfig.proxyModelOverride,
+          provider: provider,
+        })
       }
 
-      // Show appropriate message based on session status
-      if (session.status === 'running' || session.status === 'starting') {
+      // Track model selection event
+      const newModel = provider === 'anthropic' ? modelValue || 'default' : customModel
+      trackEvent(POSTHOG_EVENTS.MODEL_SELECTED, {
+        model: newModel,
+        provider: provider,
+        previous_model: previousModel,
+        previous_provider: previousProvider,
+      })
+
+      // Show appropriate message based on session status and existence
+      if (!session.id) {
+        toast.success('Model selection saved for new draft')
+      } else if (session.status === 'running' || session.status === 'starting') {
         toast.success('Model change will apply at next message')
       } else {
         toast.success('Model updated')
@@ -239,8 +280,10 @@ function ModelSelectorContent({
       // Don't clear the API key from state - keep it for display
       // setApiKey('') // Clear API key from state after saving
 
-      // Refresh the session data to update the status bar
-      await fetchActiveSessionDetail(session.id)
+      // Refresh the session data to update the status bar (only if session exists)
+      if (session.id) {
+        await fetchActiveSessionDetail(session.id)
+      }
 
       // Close modal immediately after successful update
       onClose()
@@ -252,8 +295,30 @@ function ModelSelectorContent({
     }
   }
 
+  // Register CMD+ENTER to apply changes
+  useHotkeys(
+    'mod+enter',
+    e => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (
+        hasChanges &&
+        !isUpdating &&
+        (provider !== 'openrouter' || canApplyOpenRouter) &&
+        (provider !== 'baseten' || canApplyBaseten) &&
+        (provider === 'anthropic' || customModel.trim())
+      ) {
+        handleApply()
+      }
+    },
+    {
+      scopes: [HOTKEY_SCOPES.SELECT_MODEL_MODAL],
+      enableOnFormTags: true,
+    },
+  )
+
   return (
-    <>
+    <div ref={focusTrapRef}>
       <DialogHeader>
         <DialogTitle>Model Configuration</DialogTitle>
         {isAdvancedProvidersEnabled && (
@@ -331,6 +396,7 @@ function ModelSelectorContent({
                 <SelectItem value="default">System Default</SelectItem>
                 <SelectItem value="sonnet">Sonnet</SelectItem>
                 <SelectItem value="opus">Opus</SelectItem>
+                <SelectItem value="haiku">Haiku</SelectItem>
               </SelectContent>
             </Select>
           )}
@@ -447,7 +513,7 @@ function ModelSelectorContent({
 
         {/* Action Buttons */}
         <div className="flex justify-end gap-2 pt-2">
-          <Button onClick={onClose} disabled={isUpdating} variant="outline" size="sm">
+          <Button onClick={onClose} disabled={isUpdating} variant="secondary" size="sm">
             Cancel
           </Button>
           <Button
@@ -462,10 +528,15 @@ function ModelSelectorContent({
             size="sm"
           >
             {isUpdating ? 'Applying...' : 'Apply'}
+            {!isUpdating && (
+              <kbd className="ml-1 px-1 py-0.5 text-xs bg-muted/50 rounded">
+                {navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'Ctrl'}+ENTER
+              </kbd>
+            )}
           </Button>
         </div>
       </div>
-    </>
+    </div>
   )
 }
 
@@ -482,40 +553,47 @@ export function ModelSelector({
   const setIsOpen = onOpenChange ?? setInternalOpen
 
   return (
-    <Dialog open={isOpen} onOpenChange={setIsOpen}>
-      {/* Only show trigger if not controlled externally */}
-      {!open && !onOpenChange && (
-        <DialogTrigger asChild>
-          <Button
-            variant="ghost"
-            size="sm"
-            className={`h-8 w-8 p-0 ${className}`}
-            title="Model Configuration"
-          >
-            <GitBranch className="h-4 w-4" />
-          </Button>
-        </DialogTrigger>
-      )}
-
-      <DialogContent
-        className="max-w-md"
-        onInteractOutside={e => {
-          // Prevent closing when clicking outside if there are unsaved changes
-          e.preventDefault()
-        }}
-        onEscapeKeyDown={e => {
-          // Let the dialog handle escape
-          e.stopPropagation()
-        }}
-      >
-        {isOpen && (
-          <ModelSelectorContent
-            session={session}
-            onModelChange={onModelChange}
-            onClose={() => setIsOpen(false)}
-          />
+    <HotkeyScopeBoundary
+      scope={HOTKEY_SCOPES.SELECT_MODEL_MODAL}
+      isActive={isOpen}
+      rootScopeDisabled={true}
+      componentName="ModelSelector"
+    >
+      <Dialog open={isOpen} onOpenChange={setIsOpen}>
+        {/* Only show trigger if not controlled externally */}
+        {!open && !onOpenChange && (
+          <DialogTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={`h-8 w-8 p-0 ${className}`}
+              title="Model Configuration"
+            >
+              <GitBranch className="h-4 w-4" />
+            </Button>
+          </DialogTrigger>
         )}
-      </DialogContent>
-    </Dialog>
+
+        <DialogContent
+          className="max-w-md"
+          onInteractOutside={e => {
+            // Prevent closing when clicking outside if there are unsaved changes
+            e.preventDefault()
+          }}
+          onEscapeKeyDown={e => {
+            // Let the dialog handle escape
+            e.stopPropagation()
+          }}
+        >
+          {isOpen && (
+            <ModelSelectorContent
+              session={session}
+              onModelChange={onModelChange}
+              onClose={() => setIsOpen(false)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+    </HotkeyScopeBoundary>
   )
 }
