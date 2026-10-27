@@ -1,114 +1,50 @@
-<div align="center">
+# HumanLayer
 
-![Wordmark Logo of HumanLayer](./docs/images/wordmark-light.svg)
+HumanLayer runs coding agents (Claude Code, Codex, OpenCode, Pi) on your machines and lets your team steer them from one place: tasks, sessions, plans, and reviews, synced between a desktop app, a web app, and a daemon on each host.
 
-</div>
+This repo holds all of it. It's a [Turborepo](https://turborepo.com) monorepo that uses [Bun](https://bun.sh).
 
-<div align="center">
+## What's here
 
-## The best way to get Coding Agents to solve hard problems in complex codebases
+- `apps/riptide-ui`: the app, as a web app and inside the desktop shells
+- `apps/riptide-electron`, `apps/riptide-native`: the macOS desktop apps (Electron, Tauri)
+- `apps/riptide-daemon`: the daemon that runs agent sessions on a host
+- `apps/cli`: the `humanlayer` CLI, which also ships the daemon
+- `apps/riptide-api`: the oRPC + Hono API
+- `apps/riptide-electric-proxy`: the auth proxy in front of [Electric](https://electric-sql.com), which syncs Postgres to clients
+- `apps/riptide-cloud`: the admin web app (organizations, invites, settings, install page)
+- `apps/riptide-migrator`, `apps/updater-server`, `apps/stale-daemon-sweeper`, `apps/database-maintenance-function`: AWS Lambda jobs
+- `apps/riptide-claude-code-plugin`, `apps/riptide-opencode-plugin`, `apps/riptide-pi-extension`: plugins that mirror Claude Code, OpenCode, and Pi sessions into HumanLayer
+- `apps/riptide-humanlayer-claude-plugin`: the built-in HumanLayer skills
+- `apps/riptide-rpi-claude-plugin`, `apps/linear-cli`: the Research-Plan-Implement skills and the Linear CLI
+- `apps/docs`: the user docs
+- `apps/devstack`: runs a full local stack per worktree
+- `packages/`: shared libraries (`db`, `schemas`, `ui`, `sync`, `ai`, `billing`, ...)
+- `contracts/`: the oRPC and Effect RPC contracts between the apps
 
-**CodeLayer is an open source IDE that lets you orchestrate AI coding agents.**
+## Get started
 
-It comes with battle-tested workflows that enable AI to solve hard problems in large, complex codebases.
+You need [Bun](https://bun.sh) and Docker. Building `apps/riptide-native` also needs Rust.
 
-Built on Claude Code. Open source. Scale from your laptop to your entire team.
-
-[![GitHub Repo stars](https://img.shields.io/github/stars/humanlayer/humanlayer)](https://github.com/humanlayer/humanlayer)
-[![License: Apache-2](https://img.shields.io/badge/License-Apache-green.svg)](https://opensource.org/licenses/Apache-2)
-
-<h3>
-
-[Join Waitlist](https://humanlayer.dev/code) | [Discord](https://humanlayer.dev/discord)
-
-</h3>
-
-<img referrerpolicy="no-referrer-when-downgrade" src="https://static.scarf.sh/a.png?x-pxid=fcfc0926-d841-47fb-b8a6-6aba3a6c3228" />
-
-</div>
-
----
-
-> "Our entire company is using CodeLayer now. We're shipping one banger PR after the other. It is so f-ing good. Unbelievable dude."
->
-> **– René Brandel, Founder @ Casco (YC X25)**
-
----
-
-- **Superhuman for Claude Code** - Keyboard-first workflows designed for builders who value speed and control.
-
-- **Advanced Context Engineering** - Scale AI-first dev to your entire team, without devolving into a chaotic slop-fest.
-
-- **M U L T I C L A U D E** - Run Claude Code sessions in parallel. Worktrees? Done. Remote cloud workers? You got it.
-
----
-
-> "This has improved my productivity (and token consumption) by at least 50%. Taking a superhuman style approach just makes soo much sense. Also, its so freaking cool to look back at all the work you've done in a day."
->
-> **– Tyler Brown, Founder @ Revlo.ai**
-
----
-
-## From the team that brought you "Context Engineering"
-
-Leading experts on getting the most out of today's models.
-
-#### [Advanced Context Engineering for Coding Agents](https://github.com/humanlayer/humanlayer)
-This talk, given at YC on August 20th, 2025 lays out the groundwork for using AI to solve hard problems in complex codebases.
-- [GitHub](https://github.com/humanlayer/humanlayer)
-- [YouTube](https://humanlayer.dev/youtube)
-
-#### [12 Factor Agents](https://github.com/humanlayer/humanlayer)
-A set of principles for building reliable and scalable LLM applications, inspired by the original 12-Factor App methodology.
-- [GitHub](https://github.com/humanlayer/humanlayer)
-- [YouTube](https://humanlayer.dev/youtube)
-
-The original repo that coined the term "context engineering" back in April 2025.
-
-#### [🦄 AI That Works](https://humanlayer.dev/podcast)
-A weekly conversation about how we can all get the most juice out of todays models with @hellovai & @dexhorthy
-- [GitHub](https://github.com/humanlayer/humanlayer)
-- [Podcast](https://humanlayer.dev/podcast)
-
----
-
-## For Teams
-
-**Invest in outcomes, not tools.**
-
-Want to scale AI-first development to your entire org? Get tailored workflows, custom integrations, and cutting-edge advice.
-
-HumanLayer's expert engineers will ship in the trenches with you and your team until everyone is a 100x engineer.
-
-📧 Shoot us an email at **contact@humanlayer.dev**, mention your team size and current AI development stack.
-
----
-
-## Quick Start
-
-```bash
-# Coming soon - join the waitlist for early access
-npx humanlayer join-waitlist --email ...
+```
+bun install
+cp .env.example .env
+bun --bun run typecheck
+bun run test
 ```
 
----
+`bun --bun run devstack help` explains how to run the whole stack locally. [CONTRIBUTING.md](CONTRIBUTING.md) lists every check a pull request must pass.
 
-## Legacy Documentation
+A build from source sends nothing to us: Sentry, PostHog, and the WorkOS client ID come from env, and stay off when unset. `.env.example` lists them.
 
-Looking for the HumanLayer SDK documentation? See [humanlayer.md](./humanlayer.md)
+## Self-hosting
 
-## Contributing
+HumanLayer Cloud runs this code. Guides for running it yourself are in progress.
 
-CodeLayer and the HumanLayer SDK are open-source and we welcome contributions in the form of issues, documentation, pull requests, and more. See [CONTRIBUTING.md](./CONTRIBUTING.md) for more details.
+
+⚠️ note - If you use the Docker Compose file as a starter for self hosting, please note that it uses default/simple passwords that should be updated before you deploy.
+
 
 ## License
 
-The HumanLayer SDK and CodeLayer sources in this repo are licensed under the Apache 2 License.
-
----
-
-<div align="center">
-
-[![Star History Chart](https://api.star-history.com/svg?repos=humanlayer/humanlayer&type=Date)](https://star-history.com/#humanlayer/humanlayer&Date)
-
-</div>
+[Apache License 2.0](LICENSE). A few vendored folders keep their MIT licenses; [NOTICE](NOTICE) lists them.
